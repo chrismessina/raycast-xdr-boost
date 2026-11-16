@@ -47,4 +47,19 @@ gamma table has no visible effect, so the boost does nothing there.
 
 ## Credits
 
-See [NOTICE.md](NOTICE.md).
+XDR Boost builds on these open-source projects:
+
+- [Headroom](https://github.com/fich-l/headroom) by fichl (MIT): the Swift helper is ported from its
+  `Gamma.swift`, including the EDR trigger window, the gamma-table write and the preset levels.
+- [xdr-lift](https://github.com/Justaboringname/xdr-lift) by Yihan Zhu (MIT): the trigger window setup,
+  the finding that the gamma table is gamma-encoded, and the cap that keeps light below 95% of the
+  panel's headroom.
+- [Illuminate](https://github.com/fackelmeyer/illuminate) by Jonas Fackelmeyer (MIT): the boost curve
+  that follows the brightness slider, the per-model display peaks, pausing for system states, and the
+  M5 Pro / M5 Max detection.
+- [BrightIntosh](https://github.com/niklasr22/BrightIntosh) by niklasr22 (GPL-3.0): its described
+  behavior informed waiting for EDR before writing a table. None of its code was read or used.
+- [extensions-swift-tools](https://github.com/raycast/extensions-swift-tools) by Raycast: builds the
+  Swift helper from source and calls it from TypeScript.
+
+License texts and the commits read are in [NOTICE.md](NOTICE.md).

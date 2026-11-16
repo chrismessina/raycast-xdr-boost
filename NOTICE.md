@@ -5,7 +5,7 @@ are MIT licensed; their copyright lines and license text follow.
 
 ## Headroom — MIT
 
-Copyright (c) 2026 fichl · read at commit `6e7c20a`
+<https://github.com/fich-l/headroom> · Copyright (c) 2026 fichl · read at commit `6e7c20a`
 
 The primary port source. `EDRView`, the trigger window (`makeTrigger`), the plain-table capture with
 an identity-ramp fallback (`plainTable`), the boost write, the 0.5 s layout-change debounce and the
@@ -18,7 +18,9 @@ are Headroom's.
 commit `b9ebadc`
 
 The 1×1 EDR trigger window setup (window level `CGShieldingWindowLevel() + 1`, collection behavior,
-corner placement, periodic redraw) and the gamma-table approach, carried over through Headroom.
+corner placement, periodic redraw) and the gamma-table approach, carried over through Headroom. Read
+directly as well: its `app/Booster.swift` documents that the transfer table is gamma-encoded (scaling it
+by f scales light by about f^2.2), and its light ≤ 0.95 × headroom cap is used in `Booster.write`.
 
 ## Illuminate — MIT
 
@@ -26,7 +28,10 @@ corner placement, periodic redraw) and the gamma-table approach, carried over th
 Headroom at commit `6d71603`
 
 Scaling the captured transfer table linearly by the level, and falling back to an identity ramp when
-the reading is unusable, carried over through Headroom.
+the reading is unusable, carried over through Headroom. Read directly as well: the adaptive curve's
+0.6 × headroom share (`BoostCurve.swift`), the per-model peaks (`DisplayProfile.swift`), the EDR
+engagement threshold, pause reasons kept as a set (`SuspensionState`), and the M5 Pro / M5 Max check
+(`GammaCompatibility`).
 
 ## Not used
 
