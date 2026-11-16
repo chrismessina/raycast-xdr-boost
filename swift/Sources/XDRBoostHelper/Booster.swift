@@ -438,7 +438,9 @@ final class Booster {
     }
 
     private func retryRestores() {
-        for target in unrestored { writePlain(target) }
+        let pending = unrestored
+        for target in pending { writePlain(target) }
+        if pending.contains(where: { $0.writtenLast == nil }) { onChange?() } // a restore landed: report it
         if unrestored.isEmpty { restoreTimer?.invalidate(); restoreTimer = nil }
     }
 
