@@ -6,8 +6,7 @@ import Foundation
 /// a level's position is spaced evenly in light from 1 to that maximum, then written to the transfer table as
 /// gain^(1/2.2), because the table holds gamma-encoded values: scaling it by f scales light by about f^2.2.
 /// (Documented, and checked against an EDR reference, in xdr-lift's app/Booster.swift, MIT,
-/// https://github.com/Justaboringname/xdr-lift. XDR Boost previously multiplied the table by the level directly,
-/// so "High ×1.5625" asked for about 2.67× the light.)
+/// https://github.com/Justaboringname/xdr-lift.)
 ///
 /// Two strategies (the extension's "Boost Strategy" preference):
 /// - adaptive ("Follow Brightness"): the maximum follows the panel's current EDR headroom H, which rises as the
@@ -21,7 +20,7 @@ import Foundation
 /// Every write is also held to light ≤ 0.95·H (xdr-lift's cap) in Booster.write.
 enum Curve {
     static let encodingGamma = 2.2
-    /// Max on a built-in display: 1.75 in the table, the same as before the gamma correction (1.75^2.2 ≈ 3.43).
+    /// Max on a built-in display: 1.75 in the table (1.75^2.2 ≈ 3.43 in light). Equal to BUILT_IN_MAX_GAIN in TypeScript.
     static let builtInMaxGain = pow(1.75, encodingGamma)
     /// Illuminate's sustainedFraction: the share of headroom used at full boost.
     static let headroomShare = 0.6
@@ -37,17 +36,14 @@ enum Curve {
 
     static func profile(name: String, builtIn: Bool) -> Profile {
         if builtIn { return Profile(peak: 1600, nitsCap: nil) }
-        // One Pro Display XDR (2026-11-15): modeled ~565 nits held, ~750 blanked (f^2.2 and 1600/H assumed,
-        // not measured with a meter). 560 keeps a margin.
+        // 560 keeps a margin under the ~565 nits one Pro Display XDR held (see the header).
         if name.localizedStandardContains("Pro Display XDR") { return Profile(peak: 1600, nitsCap: 560) }
-        // Not measured: same conservative cap until there are reports for this model.
+        // Not measured: the same conservative cap until there are reports for this model.
         if name.localizedStandardContains("Studio Display XDR") { return Profile(peak: 2000, nitsCap: 560) }
         return Profile(peak: 1600, nitsCap: 560)
     }
 
-    /// The table factor for a light gain.
     static func tableFactor(gain: Double) -> Double { pow(max(gain, 1.0), 1.0 / encodingGamma) }
-    /// The light gain a table factor produces.
     static func gain(tableFactor: Double) -> Double { pow(max(tableFactor, 1.0), encodingGamma) }
 
     /// The highest light gain for a display under a strategy.

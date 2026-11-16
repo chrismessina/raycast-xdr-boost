@@ -2,12 +2,11 @@ import { failToast, showError } from "@chrismessina/raycast-kit/toast";
 import { useEffect, useState } from "react";
 import { Action, ActionPanel, Icon, List, showToast, Toast } from "@raycast/api";
 import { applyOperation, continuityMessage, defaultLevel, getWanted } from "./lib/control";
-import { allState, highestLevel, hud, shortLabel } from "./lib/displays";
+import { allLabel, allState, highestLevel, hud, shortLabel } from "./lib/displays";
 import { HelperDisplay, HelperStatus, isStale, status } from "./lib/helper";
 import { dialIcon } from "./lib/icons";
 import type { Operation } from "./lib/intent";
 import { indexOfLevel, LEVELS, OFF, presetAt } from "./lib/levels";
-import { refreshMenuBar } from "./lib/no-view";
 
 const STATUS_TAG: Partial<Record<HelperDisplay["status"], string>> = {
   paused: "Paused",
@@ -23,8 +22,9 @@ export default function Command() {
 
   async function load() {
     try {
-      setState(await status());
-      setHasSaved((await getWanted()) !== undefined);
+      const [now, saved] = await Promise.all([status(), getWanted()]);
+      setState(now);
+      setHasSaved(saved !== undefined);
     } catch (error) {
       await showError(error, { title: "Couldn't Read XDR Boost" });
     } finally {
@@ -40,13 +40,11 @@ export default function Command() {
     setBusy(true);
     const toast = await showToast({ style: Toast.Style.Animated, title });
     try {
-      const applied = await applyOperation(op);
-      const { after, continuityLost } = applied;
-      setState(after);
+      const applied = await applyOperation(op, { refreshMenuBar: true });
+      setState(applied.after);
       toast.style = Toast.Style.Success;
-      toast.title = hud(after);
-      if (continuityLost) toast.message = continuityMessage(applied);
-      await refreshMenuBar();
+      toast.title = hud(applied.after);
+      toast.message = continuityMessage(applied);
     } catch (error) {
       failToast(toast, error, { title: "Couldn't Change XDR Boost" });
     } finally {
@@ -56,7 +54,6 @@ export default function Command() {
 
   const displays = state?.displays ?? [];
   const all = allState(displays);
-  const allLabel = all.kind === "preset" ? LEVELS[all.index].name : all.kind === "mixed" ? "Mixed" : "Custom";
 
   /** ↵ toggles the row between Off and the default level; ⌘K lists the five levels, current filled. */
   function actions(target: "all" | HelperDisplay) {
@@ -65,7 +62,7 @@ export default function Command() {
     const isOn = target === "all" ? displays.some((d) => d.level > OFF) : target.level > OFF;
     const request = (level: number): Operation =>
       target === "all" ? { kind: "all", level } : { kind: "displays", levels: { [target.uuid]: level } };
-    // ↵ toggles from what the displays are doing now; the transaction re-reads that under the lock (G2).
+    // The transaction re-reads what the displays are doing under the lock.
     const toggleTo = isOn ? OFF : defaultLevel();
     const toggle: Operation =
       target === "all"
@@ -126,14 +123,16 @@ export default function Command() {
         />
       ) : (
         <>
-          <List.Section title="All Displays">
-            <List.Item
-              title="All Displays"
-              icon={dialIcon(indexOfLevel(highestLevel(displays)), true)}
-              accessories={[{ text: allLabel }]}
-              actions={actions("all")}
-            />
-          </List.Section>
+          {displays.length > 1 && (
+            <List.Section title="All Displays">
+              <List.Item
+                title="All Displays"
+                icon={dialIcon(indexOfLevel(highestLevel(displays)), true)}
+                accessories={[{ text: allLabel(all) }]}
+                actions={actions("all")}
+              />
+            </List.Section>
+          )}
           <List.Section title="Connected">
             {displays.map((d) => (
               <List.Item

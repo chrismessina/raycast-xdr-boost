@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { allState, friendly, highestLevel, hud, pauseLabel, shortLabel } from "../displays";
+import { allLabel, allState, friendly, highestLevel, hud, matchDisplay, pauseLabel, shortLabel } from "../displays";
 import type { HelperDisplay, HelperStatus } from "../helper";
 
 function display(
@@ -94,5 +94,29 @@ describe("J4: a change made while paused is reported as saved, not applied", () 
     const paused = { ...state([BI(1.5625, "paused"), XDR(1.5625, "paused")]), pauseReasons: ["low-power-mode"] };
     expect(friendly(paused, "all")).toBe("Boost set to High. It applies when this ends: Low Power Mode.");
     expect(hud(paused)).toBe("XDR Boost: High (Paused)");
+  });
+});
+
+describe("matchDisplay (the AI tool's display argument)", () => {
+  const displays = [BI(1), XDR(1.5)];
+  it("matches by id first, then by name, case-insensitively", () => {
+    expect(matchDisplay(displays, "xdr").uuid).toBe("XDR");
+    expect(matchDisplay(displays, "pro display xdr").uuid).toBe("XDR");
+  });
+  it("lists the connected displays when nothing matches", () => {
+    expect(() => matchDisplay(displays, "Studio")).toThrow(/No XDR display matches "Studio". Connected: Built-in/);
+  });
+  it("asks for the id when two displays share a name", () => {
+    const twins = [display("A", "Pro Display XDR", 1), display("B", "Pro Display XDR", 1)];
+    expect(() => matchDisplay(twins, "Pro Display XDR")).toThrow(/pass its id/);
+    expect(matchDisplay(twins, "b").uuid).toBe("B");
+  });
+});
+
+describe("allLabel", () => {
+  it("names the preset, or says Custom or Mixed", () => {
+    expect(allLabel(allState([BI(1.5625), XDR(1.5625)]))).toBe("High");
+    expect(allLabel(allState([BI(1.5), XDR(1.5)]))).toBe("Custom");
+    expect(allLabel(allState([BI(1.5625), XDR(1)]))).toBe("Mixed");
   });
 });

@@ -1,15 +1,8 @@
-// Pure presentation of per-display state: how the menu summarizes displays, and the words notifications and
-// HUDs use. Intent changes live in intent.ts. No Raycast or helper imports, so every rule here is unit-tested.
 import type { HelperDisplay, HelperStatus } from "./helper";
-import { EPSILON, indexOfLevel, LEVELS, OFF, presetAt } from "./levels";
+import { indexOfLevel, LEVELS, OFF, presetAt, sameLevel } from "./levels";
 
-/** What "All Displays" shows: a preset when every display shares it, else "Custom" or "Mixed". */
 export type AllState =
   { kind: "preset"; index: number } | { kind: "custom"; index: number } | { kind: "mixed"; index: number };
-
-export function sameLevel(a: number, b: number): boolean {
-  return Math.abs(a - b) < EPSILON;
-}
 
 /** The highest level across displays (the menu bar dial shows it); 1.0 with no displays. */
 export function highestLevel(displays: HelperDisplay[]): number {
@@ -25,12 +18,17 @@ export function allState(displays: HelperDisplay[]): AllState {
   return preset ? { kind: "preset", index: LEVELS.indexOf(preset) } : { kind: "custom", index };
 }
 
-/** "Medium", "Off" or "Custom": never the number. */
+/** "Medium", "Custom" or "Mixed" for the All Displays row. */
+export function allLabel(state: AllState): string {
+  if (state.kind === "preset") return LEVELS[state.index].name;
+  return state.kind === "mixed" ? "Mixed" : "Custom";
+}
+
 export function shortLabel(level: number): string {
   return presetAt(level)?.name ?? "Custom";
 }
 
-// Max is "at maximum boost", not "as bright as it goes": on an external XDR, Max is the user's ceiling (H1).
+// Max is "at maximum boost", not "as bright as it goes": on an external XDR, Max is the user's ceiling.
 const WORDS = ["no longer boosted", "a little brighter", "brighter", "much brighter", "at maximum boost"];
 
 function describeOne(d: HelperDisplay, plural: boolean): string {
@@ -43,18 +41,15 @@ function describeOne(d: HelperDisplay, plural: boolean): string {
   return `${subject} ${words}.`;
 }
 
-/**
- * Notification text after a change: relative words, never numbers. Speaks about "your displays" when
- * every display ended up the same, otherwise one sentence per display that the change touched.
- */
+/** Notification text after a change: relative words, never numbers. */
 export function friendly(after: HelperStatus, scope: "all" | string[]): string {
   const displays = after.displays;
   if (displays.length === 0) return "No XDR display is connected, so nothing changed.";
   const paused = pauseLabel(after);
   if (paused) {
-    // Saved, not applied (J4): say when it takes effect instead of announcing brightness.
+    // Saved, not applied: say when it takes effect instead of announcing brightness.
     const state = allState(displays);
-    const name = state.kind === "preset" ? LEVELS[state.index].name : state.kind === "mixed" ? "your levels" : "Custom";
+    const name = state.kind === "mixed" ? "your levels" : allLabel(state);
     return `Boost set to ${name}. It applies when this ends: ${paused.replace(/^Paused: /, "")}.`;
   }
   const uniform = displays.every((d) => sameLevel(d.level, displays[0].level) && d.status === displays[0].status);
@@ -81,7 +76,6 @@ export function pauseLabel(status: HelperStatus): string | undefined {
   return first ? `Paused: ${PAUSE_LABELS[first] ?? first}` : undefined;
 }
 
-/** Shown on M5 Pro / M5 Max, where macOS accepts gamma tables but doesn't display them. */
 export const GAMMA_UNSUPPORTED = "Not supported on M5 Pro / M5 Max: macOS ignores the gamma boost there";
 
 /** HUD text after a change. */
@@ -89,8 +83,30 @@ export function hud(after: HelperStatus): string {
   if (after.displays.length === 0) return "No XDR Display Found";
   if (!after.running) return "XDR Boost Off";
   const state = allState(after.displays);
-  const suffix = pauseLabel(after) ? " (Paused)" : "";
-  if (state.kind === "mixed") return `XDR Boost: Mixed${suffix}`;
-  if (state.kind === "custom") return `XDR Boost: Custom${suffix}`;
-  return state.index === 0 ? "XDR Boost Off" : `XDR Boost: ${LEVELS[state.index].name}${suffix}`;
+  if (state.kind === "preset" && state.index === 0) return "XDR Boost Off";
+  return `XDR Boost: ${allLabel(state)}${pauseLabel(after) ? " (Paused)" : ""}`;
+}
+
+/** The per-display rows both AI tools return. */
+export function toolDisplays(displays: HelperDisplay[]) {
+  return displays.map((d) => ({
+    id: d.uuid,
+    name: d.name,
+    level: d.level,
+    levelName: shortLabel(d.level),
+    effectiveLevel: d.effectiveLevel,
+    status: d.status,
+  }));
+}
+
+/** The one display `query` names, by id first, then by name (both case-insensitive). Throws with the list otherwise. */
+export function matchDisplay(displays: HelperDisplay[], query: string): HelperDisplay {
+  const wanted = query.toLowerCase();
+  const byId = displays.filter((d) => d.uuid.toLowerCase() === wanted);
+  const matches = byId.length ? byId : displays.filter((d) => d.name.toLowerCase() === wanted);
+  const listed = displays.map((d) => `${d.name} (id ${d.uuid})`).join(", ") || "none";
+  if (matches.length === 0) throw new Error(`No XDR display matches "${query}". Connected: ${listed}.`);
+  if (matches.length > 1)
+    throw new Error(`More than one display is named "${query}"; pass its id. Connected: ${listed}.`);
+  return matches[0];
 }

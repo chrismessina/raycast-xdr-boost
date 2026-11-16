@@ -7,8 +7,8 @@ import { allState, GAMMA_UNSUPPORTED, highestLevel, pauseLabel, shortLabel } fro
 import * as helper from "./lib/helper";
 import { HelperDisplay, HelperStatus, isStale } from "./lib/helper";
 import { dialIcon, menuBarIcon } from "./lib/icons";
-import type { Operation } from "./lib/intent";
-import { decideKeepAlive } from "./lib/keepalive";
+import { matchesTuning, type Operation } from "./lib/intent";
+import { shouldRestart } from "./lib/keepalive";
 import { indexOfLevel, LEVELS, presetAt } from "./lib/levels";
 import { log } from "./lib/log";
 
@@ -27,31 +27,25 @@ export default function Command() {
   async function report(err: unknown, title: string) {
     setError(redactSecrets(err instanceof Error ? err.message : String(err)));
     log(title, { error: err instanceof Error ? err.message : String(err) });
-    // A background tick has no one looking: no toast.
     if (environment.launchType !== LaunchType.Background) await showError(err, { title });
   }
 
   useEffect(() => {
     (async () => {
-      let current = await helper.status();
-      const saved = await getWanted();
+      const [live, saved] = await Promise.all([helper.status(), getWanted()]);
       const { restoreAfterRestart } = getPreferenceValues<Preferences>();
-      const decision = decideKeepAlive({ restoreAfterRestart, running: current.running, wanted: saved });
-      log("tick", { running: current.running, stale: isStale(current), saved, decision: decision.action });
-      // An older build's helper (still running after an update) is replaced, and the saved intent re-applied,
-      // so an update never leaves an unreadable helper boosting. Restore after restart applies the same intent.
-      // A changed "External XDR Maximum" preference reaches a running helper on the next tick (or any change).
-      const wanted = tuning();
-      const ceilingChanged =
-        current.running &&
-        !isStale(current) &&
-        (current.externalMax !== wanted.externalMax ||
-          current.strategy !== wanted.strategy ||
-          current.lowBattery !== wanted.lowBattery);
-      if (isStale(current) || decision.action === "start" || ceilingChanged) {
+      const restart = shouldRestart({ restoreAfterRestart, running: live.running, wanted: saved });
+      const stale = isStale(live);
+      log("tick", { running: live.running, stale, saved, restart });
+      const tuningChanged = live.running && !stale && !matchesTuning(live, tuning());
+      let current = live;
+      // Re-applying the saved intent replaces an older build's helper, restarts after a restart, and hands a
+      // running helper changed preferences.
+      if (stale || restart || tuningChanged) {
         const applied = await applyOperation({ kind: "restore" });
         current = applied.after;
-        if (applied.continuityLost) setError(continuityMessage(applied));
+        const lost = continuityMessage(applied);
+        if (lost) setError(lost);
       }
       setStatus(current);
     })()
@@ -59,14 +53,12 @@ export default function Command() {
       .finally(() => setBusy(false));
   }, []);
 
-  // isLoading stays true while a change runs, so Raycast keeps the command loaded until it settles.
   async function choose(op: Operation) {
     setBusy(true);
     try {
       const applied = await applyOperation(op);
       setStatus(applied.after);
-      // A replaced older helper with nothing saved is disclosed here too, not cleared away.
-      setError(applied.continuityLost ? continuityMessage(applied) : undefined);
+      setError(continuityMessage(applied));
     } catch (err) {
       await report(err, "Couldn't Change XDR Boost");
     } finally {
@@ -93,7 +85,16 @@ export default function Command() {
       {status?.gammaSupported === false && <MenuBarExtra.Item title={GAMMA_UNSUPPORTED} icon={Icon.Warning} />}
       {status && pauseLabel(status) && <MenuBarExtra.Item title={pauseLabel(status) as string} icon={Icon.Pause} />}
       {status && displays.length === 0 && <MenuBarExtra.Item title="No XDR Display Found" icon={Icon.Warning} />}
-      {displays.length > 0 && (
+      {displays.length === 1 && (
+        <MenuBarExtra.Section title={displayTitle(displays[0])}>
+          {levelItems(
+            displays[0].level,
+            (level) => choose({ kind: "displays", levels: { [displays[0].uuid]: level } }),
+            true,
+          )}
+        </MenuBarExtra.Section>
+      )}
+      {displays.length > 1 && (
         <MenuBarExtra.Section title="All Displays">
           {LEVELS.map((level, index) => (
             <MenuBarExtra.Item
@@ -101,40 +102,54 @@ export default function Command() {
               title={level.name}
               icon={dialIcon(index, all.kind === "preset" && all.index === index)}
               // ⌘0–⌘4 while the menu is open, as in Headroom's menu.
-              shortcut={{ modifiers: ["cmd"], key: String(index) as Keyboard.KeyEquivalent }}
+              shortcut={shortcut(index)}
               onAction={() => choose({ kind: "all", level: level.value })}
             />
           ))}
-          {/* Status rows, no action: shown only when no single preset describes every display. */}
           {all.kind === "custom" && <MenuBarExtra.Item title="Custom" icon={dialIcon(all.index, true)} />}
           {all.kind === "mixed" && <MenuBarExtra.Item title="Mixed" icon={dialIcon(all.index, true)} />}
         </MenuBarExtra.Section>
       )}
-      {displays.length > 0 && (
+      {displays.length > 1 && (
         <MenuBarExtra.Section>
-          {displays.map((d) => {
-            const suffix = STATUS_SUFFIX[d.status];
-            const preset = presetAt(d.level);
-            return (
-              <MenuBarExtra.Submenu
-                key={d.uuid}
-                title={`${d.name} (${shortLabel(d.level)}${suffix ? ` · ${suffix}` : ""})`}
-                icon={dialIcon(indexOfLevel(d.level))}
-              >
-                {LEVELS.map((level, index) => (
-                  <MenuBarExtra.Item
-                    key={level.name}
-                    title={level.name}
-                    icon={dialIcon(index, preset === level)}
-                    onAction={() => choose({ kind: "displays", levels: { [d.uuid]: level.value } })}
-                  />
-                ))}
-                {!preset && <MenuBarExtra.Item title="Custom" icon={dialIcon(indexOfLevel(d.level), true)} />}
-              </MenuBarExtra.Submenu>
-            );
-          })}
+          {displays.map((d) => (
+            <MenuBarExtra.Submenu
+              key={d.uuid}
+              title={`${d.name} (${shortLabel(d.level)}${STATUS_SUFFIX[d.status] ? ` · ${STATUS_SUFFIX[d.status]}` : ""})`}
+              icon={dialIcon(indexOfLevel(d.level))}
+            >
+              {levelItems(d.level, (level) => choose({ kind: "displays", levels: { [d.uuid]: level } }), false)}
+            </MenuBarExtra.Submenu>
+          ))}
         </MenuBarExtra.Section>
       )}
     </MenuBarExtra>
   );
+}
+
+function shortcut(index: number): Keyboard.Shortcut {
+  return { modifiers: ["cmd"], key: String(index) as Keyboard.KeyEquivalent };
+}
+
+/** "Built-in Retina Display", plus its status when it isn't simply on or off ("· Waiting"). */
+function displayTitle(d: HelperDisplay): string {
+  const suffix = STATUS_SUFFIX[d.status];
+  return suffix && d.status !== "paused" ? `${d.name} · ${suffix}` : d.name;
+}
+
+/** The five levels for one display, its current preset filled, plus a Custom row for a level between presets. */
+function levelItems(current: number, pick: (level: number) => void, shortcuts: boolean) {
+  const preset = presetAt(current);
+  return [
+    ...LEVELS.map((level, index) => (
+      <MenuBarExtra.Item
+        key={level.name}
+        title={level.name}
+        icon={dialIcon(index, preset === level)}
+        shortcut={shortcuts ? shortcut(index) : undefined}
+        onAction={() => pick(level.value)}
+      />
+    )),
+    ...(preset ? [] : [<MenuBarExtra.Item key="custom" title="Custom" icon={dialIcon(indexOfLevel(current), true)} />]),
+  ];
 }

@@ -3,7 +3,6 @@ import { LaunchProps } from "@raycast/api";
 import { levelLabel, parseLevel } from "./lib/levels";
 import { runNoView } from "./lib/no-view";
 
-/** Sets every display to one level: a preset name, 1.0–1.75, or a percent. */
 export default async function Command(props: LaunchProps<{ arguments: Arguments.QuickSetBoost }>) {
   const level = parseLevel(props.arguments.level);
   if (level === undefined) {

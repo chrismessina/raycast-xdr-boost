@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import { environment, getPreferenceValues, LocalStorage } from "@raycast/api";
+import { environment, getPreferenceValues, launchCommand, LaunchType, LocalStorage } from "@raycast/api";
 import { friendly } from "./displays";
 import * as helper from "./helper";
 import { HelperStatus, isStale } from "./helper";
@@ -30,7 +30,7 @@ const SETTLE_TIMEOUT_MS = 3000;
 const SETTLE_POLL_MS = 100;
 const lockPath = () => join(environment.supportPath, "intent.lock");
 
-/** The saved intent (validated), for restore-after-restart; undefined when never set or unreadable. */
+/** The saved intent, validated; undefined when never set or unreadable. */
 export async function getWanted(): Promise<Intent | undefined> {
   const raw = await LocalStorage.getItem<string>(WANTED_KEY);
   if (!raw) return undefined;
@@ -41,7 +41,6 @@ export async function getWanted(): Promise<Intent | undefined> {
   }
 }
 
-/** How the helper turns levels into light (Boost Strategy + External XDR Maximum), sent with every snapshot. */
 export function tuning(): Tuning {
   const prefs = getPreferenceValues<Preferences>();
   return {
@@ -65,47 +64,59 @@ async function poll(until: (s: HelperStatus) => boolean): Promise<HelperStatus> 
   return now;
 }
 
+/**
+ * Re-renders the menu bar item so its icon matches the new state now, not on the next interval tick.
+ * Silent on failure, deliberately: `launchCommand` rejects whenever the menu bar command is disabled,
+ * which is a normal setup for someone who only uses the hotkey commands or the AI tools. A failure
+ * toast there would follow every successful change, and in an AI tool it could fail the tool's result.
+ */
+async function refreshMenuBar(): Promise<void> {
+  try {
+    await launchCommand({ name: "menu-bar", type: LaunchType.Background });
+  } catch (error) {
+    log("menu bar refresh skipped", { error: error instanceof Error ? error.message : String(error) });
+  }
+}
+
 export interface Applied {
   after: HelperStatus;
-  intent: Intent;
   /** The operation changed nothing for connected displays ("Already at Max" / "Already Off"). */
   saturated: boolean;
-  /** An older build's helper was replaced and no saved levels existed: this change started from no boost (G3). */
-  continuityLost: boolean;
-  /** Which kind of loss, for the wording. */
+  /** Whether replacing an older build's helper, with no saved levels, made this change start from no boost. */
   loss: BaselineLoss;
 }
 
-/** Shown wherever replacing an outdated helper lost the previous levels. */
-export function continuityMessage(applied: Pick<Applied, "loss">): string {
-  if (applied.loss === "restore")
-    return "Boost turned off: the previous version's levels couldn't be carried over. Set a level to turn it back on.";
-  if (applied.loss === "toggle")
-    return "The previous version's levels couldn't be read, so the boost was turned off to be safe. Toggle again to turn it on.";
-  return "The previous version's levels couldn't be carried over, so this change started from no boost.";
+/** What to tell the user when replacing an outdated helper lost the previous levels; undefined when nothing was lost. */
+export function continuityMessage(applied: Pick<Applied, "loss">): string | undefined {
+  switch (applied.loss) {
+    case "none":
+      return undefined;
+    case "restore":
+      return "Boost turned off: the previous version's levels couldn't be carried over. Set a level to turn it back on.";
+    case "toggle":
+      return "The previous version's levels couldn't be read, so the boost was turned off to be safe. Toggle again to turn it on.";
+    case "change":
+      return "The previous version's levels couldn't be carried over, so this change started from no boost.";
+  }
 }
 
 /**
- * The ONE way intent changes (the extension is the only writer). Inside a cross-process lock:
- * stop a helper left by an older build, read the saved intent, compute the complete next snapshot,
- * save it, send that same snapshot (replace a running helper's intent, or start one with it), and
- * succeed only when the helper reports back exactly that snapshot. The notification is posted after
- * the lock is released.
+ * The one way intent changes. Inside a cross-process lock, the complete next snapshot is saved, sent to the
+ * helper, and accepted only when the helper reports back exactly that snapshot. The notification (and, when
+ * asked, the menu bar refresh) runs after the lock is released.
  */
-export async function applyOperation(op: Operation): Promise<Applied> {
+export async function applyOperation(op: Operation, options: { refreshMenuBar?: boolean } = {}): Promise<Applied> {
   const result = await withFileLock(lockPath(), async () => {
-    let current = await helper.status();
-    // Read (and validate) the saved intent BEFORE stopping anything, so a missing record is known up front.
-    const savedBefore = await getWanted();
-    const wasStale = isStale(current);
-    // Decide toggles BEFORE a stale stop: the stopped read-back would say "off" for a helper that was boosting (G4).
-    const resolved = resolveOperation(op, current, wasStale, savedBefore !== undefined);
+    const [live, savedBefore] = await Promise.all([helper.status(), getWanted()]);
+    const wasStale = isStale(live);
+    // Resolve toggles from `live`, never from the read-back after a stale stop, which always says "off".
+    const resolved = resolveOperation(op, live, wasStale, savedBefore !== undefined);
     const loss = baselineLost(op, wasStale, savedBefore !== undefined);
-    const continuityLost = loss !== "none";
+    let current = live;
     if (wasStale) {
       // An older build may ignore the new messages and not apply this build's limits; quit is the one message every
-      // build must keep understanding. Its levels are treated as unknown, so the saved intent below carries over.
-      log("stale helper: stopping", { pid: current.pid, protocol: current.protocol });
+      // build must keep understanding.
+      log("stale helper: stopping", { pid: live.pid, protocol: live.protocol });
       await helper.stop();
       current = await poll((s) => !s.running);
       if (current.running) throw new Error("An older XDR Boost helper is still running and did not stop.");
@@ -113,21 +124,24 @@ export async function applyOperation(op: Operation): Promise<Applied> {
     const saved = savedBefore ?? NO_INTENT;
     const connected = current.displays.map((d) => d.uuid);
     const { intent, saturated } = computeNext(resolved, saved, connected);
-    if (continuityLost) log("stale helper replaced without saved levels: started from no boost", { op: resolved });
+    if (loss !== "none") log("stale helper replaced without saved levels: started from no boost", { op: resolved });
     log("apply", { op: resolved, saved, intent, running: current.running });
     await LocalStorage.setItem(WANTED_KEY, JSON.stringify(intent));
     const ceiling = tuning();
     if (current.running) await helper.setLevels(intent, ceiling);
-    else if (boostsAnything(intent)) await helper.start(intent.all, intent.levels, ceiling);
+    else if (boostsAnything(intent)) await helper.start(intent, ceiling);
     const after = await poll((s) => !isStale(s) && acknowledged(s, intent, ceiling));
     if (isStale(after) || !acknowledged(after, intent, ceiling)) {
       log("not acknowledged", { intent, after: { running: after.running, all: after.allLevel, levels: after.levels } });
       throw new Error("The helper did not confirm the new levels within 3 seconds.");
     }
-    return { after, intent, saturated, continuityLost, loss };
+    return { after, saturated, loss };
   });
   log("settled", { displays: result.after.displays.map((d) => [d.name, d.level, d.status]) });
-  await notify(result.continuityLost ? continuityMessage(result) : friendly(result.after, scopeOf(op)));
+  await Promise.all([
+    notify(continuityMessage(result) ?? friendly(result.after, scopeOf(op))),
+    options.refreshMenuBar ? refreshMenuBar() : undefined,
+  ]);
   return result;
 }
 

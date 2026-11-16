@@ -13,8 +13,6 @@ let boosterLog = Logger(subsystem: "com.chrismessina.xdr-boost", category: "boos
 // the plain-table capture, the 0.5 s layout-change debounce and the 1 s re-assert timer.
 // Headroom in turn credits xdr-lift (MIT, © 2026 Yihan Zhu) for the trigger window setup and
 // Illuminate (MIT, © 2026 Jonas Fackelmeyer) for the linear scale with an identity-ramp fallback.
-// New here: per-display levels keyed by hardware UUID, the light-gain curve and strategies (Curve.swift), the
-// light ≤ 0.95·H write cap (`tableCap`, after xdr-lift), and pausing (`setPaused`).
 
 enum DisplayStatus: String, Codable {
     case off
@@ -34,7 +32,6 @@ struct DisplaySnapshot: Codable {
     let builtIn: Bool
     let potentialEDR: Double
     let currentEDR: Double
-    /// The level the user asked for on this display.
     let level: Double
     /// The LIGHT gain actually applied (from the table factor via the curve, capped by headroom); 1.0 when nothing is written.
     /// A different unit from `level`, which is a position on the Off → Max scale.
@@ -45,22 +42,20 @@ struct DisplaySnapshot: Codable {
 final class Booster {
     typealias Table = (r: [CGGammaValue], g: [CGGammaValue], b: [CGGammaValue])
 
-    /// How long a display may have no headroom after its trigger appears before we give up on it.
     private static let engageTimeout: TimeInterval = 10
-    /// How often an `edr-unavailable` display is retried.
     private static let retryInterval: TimeInterval = 60
     /// A headroom dip must last this long before we lower the table (Space switches dip briefly).
     private static let dipGrace: TimeInterval = 2
-    /// Re-assert only when the read-back last entry drifts by more than this from what we wrote.
     private static let driftTolerance: Float = 0.01
     /// Headroom above which EDR counts as engaged (Illuminate's EngagementMachine readyThreshold, MIT).
     private static let engagedHeadroom = 1.05
-    /// Rewrite the table only when the effective factor moves by more than this.
     private static let factorStep: Double = 0.01
 
     private final class Target {
         let id: CGDirectDisplayID
         let uuid: String
+        let builtIn: Bool
+        let profile: Curve.Profile
         let base: Table
         var trigger: NSWindow?
         var status: DisplayStatus = .off
@@ -69,15 +64,16 @@ final class Booster {
         var lowSince: Date?
         var effective: Double = 1.0
         var writtenLast: Float?
-        /// What `apply` last acted on: level + strategy + ceiling. Only a change to this writes at once (F8/J3);
+        /// What `apply` last acted on: level + strategy + ceiling. Only a change to this writes at once;
         /// headroom movement under "adaptive" is `tick`'s business, dip grace included.
         var requestKey = ""
-        /// The screen frame the trigger was placed on: re-place it only when this moves.
         var frame: NSRect = .zero
 
-        init(id: CGDirectDisplayID, uuid: String, base: Table) {
+        init(id: CGDirectDisplayID, uuid: String, name: String, base: Table) {
             self.id = id
             self.uuid = uuid
+            builtIn = CGDisplayIsBuiltin(id) != 0
+            profile = Curve.profile(name: name, builtIn: builtIn)
             self.base = base
         }
     }
@@ -86,23 +82,22 @@ final class Booster {
     private(set) var allLevel: Double
     /// Per-display levels by hardware UUID. Kept while a display is unplugged, so it comes back at its own level.
     private(set) var levels: [String: Double]
-    /// Max LIGHT gain for external XDR displays under the "fixed" strategy (the "External XDR Maximum" preference).
+    /// Max LIGHT gain for external XDR displays under the "fixed" strategy.
     private(set) var externalMax: Double
-    /// "adaptive" (follow the brightness slider) or "fixed": see Curve.swift.
     private(set) var strategy: String
-    /// Pause while on battery power below this charge percentage; 0 = never (the "Pause When Battery Below" preference).
+    /// Pause while on battery power below this charge percentage; 0 = never.
     private(set) var lowBattery: Double
     /// Why the boost is paused, if it is. A SET, after Illuminate's SuspensionState (MIT): clearing one reason
     /// (the screen saver stopping) cannot resume the boost while another (the lock screen) still holds.
     private(set) var pauseReasons: Set<String> = []
     var isPaused: Bool { !pauseReasons.isEmpty }
-    /// Called after every change of level or display status.
     var onChange: (() -> Void)?
 
     private var targets: [Target] = []
     private var tickTimer: Timer?
     private var reassertTimer: Timer?
     private var batteryTimer: Timer?
+    private var started = false
     private var builtSignature = ""
     private var pendingRebuild: DispatchWorkItem?
 
@@ -121,26 +116,20 @@ final class Booster {
 
     func level(for uuid: String) -> Double { levels[uuid] ?? allLevel }
 
-    /// The TABLE factor to write for a target now: its level placed under the display's maximum light gain
-    /// (which, under "adaptive", follows the live headroom), gamma-encoded. See Curve.swift.
-    private func factor(for target: Target) -> Double {
+    /// The TABLE factor for a target at this headroom: its level placed under the display's maximum light gain
+    /// (which, under "adaptive", follows the headroom), gamma-encoded. See Curve.swift.
+    private func factor(for target: Target, headroom: Double) -> Double {
         let nominal = level(for: target.uuid)
         guard nominal > 1.0 else { return 1.0 }
-        let builtIn = CGDisplayIsBuiltin(target.id) != 0
-        let screen = Self.screen(for: target.id)
-        let profile = Curve.profile(name: screen?.localizedName ?? "", builtIn: builtIn)
-        let headroom = Double(screen?.maximumExtendedDynamicRangeColorComponentValue ?? 1.0)
-        let maxGain = Curve.maxGain(strategy: strategy, profile: profile, builtIn: builtIn, headroom: headroom, externalMax: externalMax)
+        let maxGain = Curve.maxGain(strategy: strategy, profile: target.profile, builtIn: target.builtIn, headroom: headroom, externalMax: externalMax)
         return Curve.tableFactor(level: nominal, maxGain: maxGain, maxLevel: Levels.range.upperBound)
     }
 
-    /// The highest table factor the live headroom allows: light ≤ 0.95·H (xdr-lift's cap), gamma-encoded.
+    /// xdr-lift's cap, gamma-encoded.
     private static func tableCap(headroom: Double) -> Double {
         Curve.tableFactor(gain: Curve.headroomSafety * headroom)
     }
 
-    /// True while anything still wants a boost: the All Displays level (it also covers displays that
-    /// reconnect later, so an unplugged XDR comes back boosted) or any display's own level.
     var wantsBoost: Bool {
         allLevel > 1.0 || levels.values.contains { $0 > 1.0 }
     }
@@ -148,20 +137,36 @@ final class Booster {
     // MARK: - Public
 
     func start() {
-        // TODO(m5): on M5 Pro / M5 Max macOS ignores gamma tables (Headroom's Chip.ignoresGammaTables);
-        // that branch would switch to an overlay here. Out of scope: the target machine is an M3 Max.
         CGDisplayRestoreColorSyncSettings() // capture plain profile tables, never boosted ones
         reconcile()
-        tickTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in self?.tick() }
-        reassertTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in self?.reassert() }
-        batteryTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in self?.checkBattery() }
+        started = true
+        batteryTimer = Self.timer(every: 60, tolerance: 10) { [weak self] in self?.checkBattery() }
+        updateTimers()
         checkBattery()
         tick()
         onChange?()
     }
 
-    /// Brings `targets` in line with the XDR screens connected now, by UUID. A display that is still
-    /// connected under the same ID keeps its table, factor and status untouched (only its 1×1 trigger is
+    /// The tick and re-assert timers run only while started and not paused, so a long lock or sleep costs no
+    /// wakeups. The battery timer keeps running: it is what clears the low-battery pause.
+    private func updateTimers() {
+        if started && !isPaused {
+            guard tickTimer == nil else { return }
+            tickTimer = Self.timer(every: 0.25, tolerance: 0.05) { [weak self] in self?.tick() }
+            reassertTimer = Self.timer(every: 1.0, tolerance: 0.2) { [weak self] in self?.reassert() }
+        } else {
+            tickTimer?.invalidate(); tickTimer = nil
+            reassertTimer?.invalidate(); reassertTimer = nil
+        }
+    }
+
+    private static func timer(every interval: TimeInterval, tolerance: TimeInterval, _ body: @escaping () -> Void) -> Timer {
+        let timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { _ in body() }
+        timer.tolerance = tolerance
+        return timer
+    }
+
+    /// A display still connected under the same ID keeps its table, factor and status (only its trigger is
     /// re-placed if the layout moved), so plugging in or rearranging one display never resets another.
     private func reconcile() {
         builtSignature = Self.layoutSignature
@@ -172,14 +177,14 @@ final class Booster {
             if let kept = targets.first(where: { $0.uuid == uuid && $0.id == id }) {
                 if let old = kept.trigger, kept.frame != screen.frame {
                     old.orderOut(nil)
-                    kept.trigger = Self.makeTrigger(on: screen, builtIn: CGDisplayIsBuiltin(id) != 0)
+                    kept.trigger = Self.makeTrigger(on: screen, builtIn: kept.builtIn)
                 }
                 kept.frame = screen.frame
                 next.append(kept)
                 continue
             }
             boosterLog.notice("new target \(id, privacy: .public) \(uuid, privacy: .public) \(screen.localizedName, privacy: .public): potential EDR \(screen.maximumPotentialExtendedDynamicRangeColorComponentValue, privacy: .public), current \(screen.maximumExtendedDynamicRangeColorComponentValue, privacy: .public)")
-            let target = Target(id: id, uuid: uuid, base: Self.plainTable(id))
+            let target = Target(id: id, uuid: uuid, name: screen.localizedName, base: Self.plainTable(id))
             target.frame = screen.frame
             next.append(target)
         }
@@ -193,9 +198,8 @@ final class Booster {
         for target in targets { apply(target, now: now) }
     }
 
-    /// Replaces the whole intent with the extension's snapshot (the extension is the only writer of intent):
-    /// `all` and every per-display level, unplugged displays included. An empty `levels` clears overrides.
-    /// Displays whose own request (level, strategy, ceiling) did not change are left alone (`apply` checks `requestKey`).
+    /// Replaces the whole intent, unplugged displays included. An empty `levels` clears overrides. Displays whose
+    /// own request (level, strategy, ceiling) did not change are left alone (`apply` checks `requestKey`).
     func replaceIntent(all: Double, levels newLevels: [String: Double], externalMax newMax: Double, strategy newStrategy: String, lowBattery newLowBattery: Double) {
         boosterLog.notice("intent: all \(all, privacy: .public), levels \(newLevels, privacy: .public), externalMax \(newMax, privacy: .public), strategy \(newStrategy, privacy: .public)")
         allLevel = all
@@ -207,7 +211,6 @@ final class Booster {
         reapply()
     }
 
-    /// Closes the trigger windows and puts every display back on its ColorSync table.
     func stop() {
         boosterLog.notice("stop")
         pendingRebuild?.cancel()
@@ -221,11 +224,11 @@ final class Booster {
                 uuid: target.uuid,
                 id: target.id,
                 name: screen.localizedName,
-                builtIn: CGDisplayIsBuiltin(target.id) != 0,
+                builtIn: target.builtIn,
                 potentialEDR: Double(screen.maximumPotentialExtendedDynamicRangeColorComponentValue),
                 currentEDR: Double(screen.maximumExtendedDynamicRangeColorComponentValue),
                 level: level(for: target.uuid),
-                effectiveLevel: Curve.gain(tableFactor: target.effective), // light gain actually applied
+                effectiveLevel: Curve.gain(tableFactor: target.effective),
                 status: target.status
             )
         }
@@ -239,6 +242,7 @@ final class Booster {
         let wasPaused = isPaused
         if active { pauseReasons.insert(reason) } else { pauseReasons.remove(reason) }
         boosterLog.notice("pause \(reason, privacy: .public)=\(active, privacy: .public); reasons \(self.pauseReasons.sorted(), privacy: .public)")
+        updateTimers()
         if !wasPaused && isPaused {
             for target in targets {
                 target.trigger?.orderOut(nil)
@@ -260,8 +264,7 @@ final class Booster {
         }
     }
 
-    /// Sets or clears the "low-battery" pause reason: on battery power and below `lowBattery` percent. Checked at
-    /// start, when the threshold changes, and every 60 s. A Mac without a battery never pauses for this.
+    /// A Mac without a battery never pauses for this.
     func checkBattery() {
         let low: Bool = {
             guard lowBattery > 0, let charge = Self.batteryOnBatteryPower() else { return false }
@@ -270,7 +273,6 @@ final class Booster {
         if low != pauseReasons.contains("low-battery") { setPaused("low-battery", low) }
     }
 
-    /// The internal battery's charge percentage while running on it; nil on AC power or without a battery.
     private static func batteryOnBatteryPower() -> Double? {
         guard let info = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
               let list = IOPSCopyPowerSourcesList(info)?.takeRetainedValue() as? [CFTypeRef] else { return nil }
@@ -294,16 +296,14 @@ final class Booster {
         onChange?()
     }
 
-    /// Brings a target in line with its requested level: off → plain table and no trigger; on → trigger, then `tick` writes.
     private func apply(_ target: Target, now: Date) {
-        // On/off follows the level the user chose (J1): the computed gain can be 1.0 under "adaptive"
+        // On/off follows the level the user chose: the computed gain can be 1.0 under "adaptive"
         // (headroom not open yet, or a bright slider), and that must not switch a requested boost off.
         let nominal = level(for: target.uuid)
         let key = "\(nominal)|\(strategy)|\(externalMax)"
         let changed = key != target.requestKey
         target.requestKey = key
         if isPaused {
-            // Remember the request; nothing is written or shown until the last pause reason clears.
             if target.status != .paused {
                 target.trigger?.orderOut(nil)
                 target.trigger = nil
@@ -325,7 +325,7 @@ final class Booster {
         switch target.status {
         case .off:
             guard let screen = Self.screen(for: target.id) else { return }
-            target.trigger = Self.makeTrigger(on: screen, builtIn: CGDisplayIsBuiltin(target.id) != 0)
+            target.trigger = Self.makeTrigger(on: screen, builtIn: target.builtIn)
             target.status = .waiting
             target.waitingSince = now
         case .boosted, .limited:
@@ -334,7 +334,7 @@ final class Booster {
             // so changing or plugging in one display never rewrites another.
             guard changed else { return }
             target.lowSince = nil
-            let wanted = factor(for: target)
+            let wanted = factor(for: target, headroom: Self.headroom(target.id))
             write(target, factor: wanted)
             target.status = boostStatus(target, wanted: wanted)
         case .waiting, .edrUnavailable, .paused:
@@ -342,7 +342,6 @@ final class Booster {
         }
     }
 
-    /// Boosted, or "limited" when the applied output is below what the curve wants (or no boost is applied yet).
     private func boostStatus(_ target: Target, wanted: Double) -> DisplayStatus {
         target.effective < wanted - Self.factorStep || target.effective <= 1.0 + 1e-6 ? .limited : .boosted
     }
@@ -356,10 +355,10 @@ final class Booster {
         var changed = false
         let before = targets.map(\.effective)
         for target in targets {
-            // A requested boost stays engaged even when the computed gain is 1.0 (J1).
+            // A requested boost stays engaged even when the computed gain is 1.0.
             guard level(for: target.uuid) > 1.0 else { continue }
-            let wanted = factor(for: target)
-            let headroom = Double(Self.screen(for: target.id)?.maximumExtendedDynamicRangeColorComponentValue ?? 1.0)
+            let headroom = Self.headroom(target.id)
+            let wanted = factor(for: target, headroom: headroom)
             let desired = min(wanted, Self.tableCap(headroom: headroom))
             switch target.status {
             case .off, .paused:
@@ -382,13 +381,13 @@ final class Booster {
             case .edrUnavailable:
                 guard let retryAt = target.retryAt, now >= retryAt, let screen = Self.screen(for: target.id) else { continue }
                 boosterLog.notice("retry \(target.id, privacy: .public)")
-                target.trigger = Self.makeTrigger(on: screen, builtIn: CGDisplayIsBuiltin(target.id) != 0)
+                target.trigger = Self.makeTrigger(on: screen, builtIn: target.builtIn)
                 target.status = .waiting
                 target.waitingSince = now
                 target.retryAt = nil
                 changed = true
             case .boosted, .limited:
-                // Unity and EDR loss are their own transitions, not subject to factorStep (J1): a boost the curve
+                // Unity and EDR loss are their own transitions, not subject to factorStep: a boost the curve
                 // no longer wants is removed even when it is tiny, and a display that lost EDR goes back to waiting
                 // even when its table is already plain. Both still wait out the dip grace.
                 let edrLost = headroom <= Self.engagedHeadroom
@@ -403,7 +402,6 @@ final class Booster {
                     target.lowSince = nil
                     write(target, factor: desired) // a factor <= 1 writes the plain table
                     if edrLost {
-                        // EDR itself is gone: wait for it again (and give up after engageTimeout).
                         target.status = .waiting
                         target.waitingSince = now
                         changed = true
@@ -416,7 +414,7 @@ final class Booster {
                 if status != target.status { target.status = status; changed = true }
             }
         }
-        // Report whenever the applied output moved, not only on status changes (J2).
+        // Report whenever the applied output moved, not only on status changes.
         if !changed { changed = zip(before, targets.map(\.effective)).contains { abs($0 - $1) > 1e-9 } }
         if changed { onChange?() }
     }
@@ -433,14 +431,14 @@ final class Booster {
             boosterLog.notice("re-assert \(target.id, privacy: .public): read back \(readBack ?? -1, privacy: .public), wrote \(written, privacy: .public)")
             write(target, factor: target.effective)
         }
-        // A repair can change the applied output (the writer re-caps it): report it, like tick does (J2).
+        // A repair can change the applied output (the writer re-caps it): report it, like tick does.
         if zip(before, targets.map(\.effective)).contains(where: { abs($0 - $1) > 1e-9 }) { onChange?() }
     }
 
-    /// The only writer of a boosted table, so the headroom cap (F1) holds on every path: engage, level
-    /// change, raise, lower, and re-assert. Never writes light above 0.95 × the panel's current headroom.
+    /// The only writer of a boosted table, so the headroom cap holds on every path: engage, level change,
+    /// raise, lower, and re-assert. Never writes light above 0.95 × the panel's current headroom, read here.
     private func write(_ target: Target, factor requested: Double) {
-        let headroom = Double(Self.screen(for: target.id)?.maximumExtendedDynamicRangeColorComponentValue ?? 1.0)
+        let headroom = Self.headroom(target.id)
         let factor = min(requested, Self.tableCap(headroom: headroom))
         guard factor > 1.0 else { writePlain(target); return }
         if factor < requested { boosterLog.debug("cap \(target.id, privacy: .public): asked \(requested, privacy: .public), headroom \(headroom, privacy: .public)") }
@@ -452,7 +450,6 @@ final class Booster {
         target.writtenLast = max(r.last ?? 0, g.last ?? 0, b.last ?? 0)
     }
 
-    /// This display's own captured table, unscaled: turns one display off without touching the others.
     private func writePlain(_ target: Target) {
         guard target.writtenLast != nil else { target.effective = 1.0; return }
         var r = target.base.r, g = target.base.g, b = target.base.b
@@ -462,7 +459,6 @@ final class Booster {
         target.writtenLast = nil
     }
 
-    /// The largest last entry across the three channels, as currently installed.
     private static func lastEntry(_ id: CGDirectDisplayID) -> Float? {
         let n = 256
         var r = [CGGammaValue](repeating: 0, count: n), g = r, b = r
@@ -529,6 +525,11 @@ final class Booster {
         NSScreen.screens.first { displayID($0) == id }
     }
 
+    /// The live EDR headroom; 1.0 (none) when the screen is gone.
+    private static func headroom(_ id: CGDirectDisplayID) -> Double {
+        Double(screen(for: id)?.maximumExtendedDynamicRangeColorComponentValue ?? 1.0)
+    }
+
     /// The screen layout plus which screens are XDR-capable. Current EDR headroom is left out on purpose:
     /// it changes constantly and also posts didChangeScreenParameters. Potential headroom is in, because a
     /// display that just reconnected can report it a moment AFTER its frame appears; without it, that
@@ -539,8 +540,8 @@ final class Booster {
     }
 
     private func tearDown() {
-        tickTimer?.invalidate(); tickTimer = nil
-        reassertTimer?.invalidate(); reassertTimer = nil
+        started = false
+        updateTimers()
         batteryTimer?.invalidate(); batteryTimer = nil
         let hadTable = targets.contains { $0.writtenLast != nil }
         targets.forEach { $0.trigger?.orderOut(nil) }

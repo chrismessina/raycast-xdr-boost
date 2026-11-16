@@ -11,15 +11,11 @@ let helperLog = Logger(subsystem: "com.chrismessina.xdr-boost", category: "helpe
 // `run` is the long-running boost and never returns: src/lib/helper.ts spawns it DETACHED, directly,
 // instead of through its generated wrapper (which would wait for it to exit). The others are one-shots
 // called through the wrappers.
-//
-// Levels: `all` is the "All Displays" level (it also applies to displays that connect later);
-// `levels` maps a display's hardware UUID to its own level. 1.0 means off.
 
 enum Notifications {
     static let set = Notification.Name("com.chrismessina.xdr-boost.set")
     static let quit = Notification.Name("com.chrismessina.xdr-boost.quit")
 
-    /// The complete intent snapshot: the helper replaces its state with it.
     static func postSet(all: Double, levels: [String: Double], externalMax: Double, strategy: String, lowBattery: Double) {
         let info: [String: Any] = [
             "all": all, "levels": levels, "externalMax": externalMax, "strategy": strategy, "lowBattery": lowBattery,
@@ -36,17 +32,15 @@ enum Notifications {
 /// state file reports a different version (or none): after an extension update the old binary can keep running,
 /// and it may not understand the new messages or apply the current build's limits (the headroom cap, the
 /// external ceiling). A matching version proves which contract is running, not that its limits are sufficient.
-let helperProtocol = 7
+/// src/lib/__tests__/protocol.test.ts pins a hash of all the helper's code to this number, so any code change forces a bump.
+let helperProtocol = 8
 
 enum Levels {
     static let range: ClosedRange<Double> = 1.0...1.75
     static func clamp(_ value: Double) -> Double { min(max(value, range.lowerBound), range.upperBound) }
     static func clamp(_ map: [String: Double]) -> [String: Double] { map.mapValues { clamp($0) } }
-    /// A maximum LIGHT gain: 1 … builtInMaxGain.
     static func clampGain(_ value: Double) -> Double { min(max(value, 1.0), Curve.builtInMaxGain) }
-    /// Anything but "fixed" is the adaptive default.
     static func strategy(_ value: String) -> String { value == "fixed" ? "fixed" : "adaptive" }
-    /// A battery threshold in percent: 0 (never) … 100.
     static func batteryPercent(_ value: Double) -> Double { value.isFinite ? min(max(value, 0), 100) : 0 }
 }
 
@@ -77,7 +71,6 @@ struct HelperState: Encodable {
     let lowBattery: Double?
     /// Why a running helper has paused the boost (empty when boosting or not running).
     let pauseReasons: [String]
-    /// False on M5 Pro / M5 Max, where gamma tables have no visible effect (see `gammaSupported()`).
     let gammaSupported: Bool
     let updatedAt: String?
     let displays: [DisplaySnapshot]
@@ -128,8 +121,8 @@ enum PidFile {
 
 // MARK: - run
 
-/// Starts the long-running boost. Never returns while any display is boosted.
-/// Argument order matters: `PidFile.isHelper` reads the state path from argv[3].
+/// Never returns while any display is boosted. Argument order matters: `PidFile.isHelper` reads the state path
+/// from argv[3] (src/lib/__tests__/protocol.test.ts checks the TypeScript side).
 @raycast func run(
     level: Double, state: String, levels: [String: Double], externalMax: Double, strategy: String, lowBattery: Double
 ) throws {
@@ -169,6 +162,12 @@ final class Session {
     private let statePath: String
     private let pidURL: URL
     private var signalSources: [DispatchSourceSignal] = []
+    private let dateFormatter = ISO8601DateFormatter()
+    private let encoder: JSONEncoder = {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return encoder
+    }()
 
     init(
         all: Double, levels: [String: Double], externalMax: Double, strategy: String, lowBattery: Double,
@@ -187,7 +186,7 @@ final class Session {
             guard let self else { return }
             let info = note.userInfo ?? [:]
             helperLog.notice("set notification: \(String(describing: info), privacy: .public)")
-            // A snapshot needs both fields; anything else is not from this build of the extension: ignore it.
+            // Anything short of a complete snapshot is not from this build of the extension: ignore it.
             guard let all = (info["all"] as? NSNumber)?.doubleValue, let raw = info["levels"] as? [String: Any],
                   let ceiling = (info["externalMax"] as? NSNumber)?.doubleValue,
                   let mode = info["strategy"] as? String,
@@ -202,7 +201,6 @@ final class Session {
                 strategy: Levels.strategy(mode),
                 lowBattery: Levels.batteryPercent(batteryFloor)
             )
-            // Everything off (connected and remembered): exit, which also restores every table.
             if !self.booster.wantsBoost { self.quit() }
         }
         center.addObserver(forName: Notifications.quit, object: nil, queue: .main) { [weak self] _ in self?.quit() }
@@ -223,8 +221,8 @@ final class Session {
         booster.start()
     }
 
-    /// The system states that pause the boost (after Illuminate's SuspensionReason, MIT). Each sets or clears
-    /// its own reason; the boost resumes only when none is left. Low battery is not tracked yet.
+    /// The system states that pause the boost (after Illuminate's SuspensionReason, MIT). Low battery is
+    /// polled in `Booster.checkBattery`.
     private func observePauseReasons() {
         let distributed = DistributedNotificationCenter.default()
         let workspace = NSWorkspace.shared.notificationCenter
@@ -243,7 +241,13 @@ final class Session {
         on(workspace, NSWorkspace.didWakeNotification.rawValue, "system-sleep", false)
         on(workspace, NSWorkspace.screensDidSleepNotification.rawValue, "displays-asleep", true)
         on(workspace, NSWorkspace.screensDidWakeNotification.rawValue, "displays-asleep", false)
-        // Low Power Mode: current state now, and every change after.
+        // The notifications only report changes: a helper started while locked, in the screen saver, or in a
+        // switched-out session must read the current state too.
+        let session = CGSessionCopyCurrentDictionary() as? [String: Any] ?? [:]
+        booster.setPaused("screen-locked", session["CGSSessionScreenIsLocked"] as? Bool ?? false)
+        booster.setPaused("session-inactive", session[kCGSessionOnConsoleKey as String] as? Bool == false)
+        let saver = NSWorkspace.shared.runningApplications.contains { $0.bundleIdentifier == "com.apple.ScreenSaver.Engine" }
+        booster.setPaused("screen-saver", saver)
         booster.setPaused("low-power-mode", ProcessInfo.processInfo.isLowPowerModeEnabled)
         NotificationCenter.default.addObserver(forName: .NSProcessInfoPowerStateDidChange, object: nil, queue: .main) { [weak self] _ in
             self?.booster.setPaused("low-power-mode", ProcessInfo.processInfo.isLowPowerModeEnabled)
@@ -268,11 +272,9 @@ final class Session {
             strategy: booster.strategy,
             lowBattery: booster.lowBattery,
             pauseReasons: booster.pauseReasons.sorted(),
-            updatedAt: ISO8601DateFormatter().string(from: Date()),
+            updatedAt: dateFormatter.string(from: Date()),
             displays: booster.snapshots
         )
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys]
         guard let data = try? encoder.encode(file) else { return }
         try? data.write(to: URL(fileURLWithPath: statePath), options: .atomic)
     }
@@ -280,7 +282,7 @@ final class Session {
 
 // MARK: - one-shots
 
-/// The connected XDR displays (read live) with the running helper's levels. A stale pid file is removed.
+/// A stale pid file is removed.
 @raycast func status(state: String) -> HelperState {
     let pidURL = PidFile.url(forState: state)
     var running = false
@@ -334,7 +336,6 @@ final class Session {
     )
 }
 
-/// Replaces the running helper's intent with this complete snapshot (the extension is the only writer).
 /// The helper quits by itself when the snapshot boosts nothing.
 @raycast func setLevels(all: Double, levels: [String: Double], externalMax: Double, strategy: String, lowBattery: Double) {
     Notifications.postSet(
@@ -342,7 +343,6 @@ final class Session {
         strategy: Levels.strategy(strategy), lowBattery: Levels.batteryPercent(lowBattery))
 }
 
-/// Stops the running helper, which restores every display.
 @raycast func quit() {
     Notifications.postQuit()
 }

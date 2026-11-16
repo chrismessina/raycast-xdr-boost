@@ -9,7 +9,6 @@ export function dialIcon(index: number, filled = false): Image.ImageLike {
   return { source: `dial-${index}${filled ? "-filled" : ""}.svg`, tintColor: Color.PrimaryText };
 }
 
-/** The menu bar item itself: outline on a light menu bar, filled on a dark one. */
 export function menuBarIcon(index: number): Image.ImageLike {
   return { source: { light: `dial-${index}.svg`, dark: `dial-${index}-filled.svg` }, tintColor: Color.PrimaryText };
 }

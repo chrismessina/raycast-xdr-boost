@@ -29,13 +29,13 @@
     {
       "name": "increase-boost",
       "title": "Increase Boost",
-      "description": "Step the boost up to the next preset level.",
+      "description": "Step each display up one preset from its own level.",
       "mode": "no-view"
     },
     {
       "name": "decrease-boost",
       "title": "Decrease Boost",
-      "description": "Step the boost down to the next preset level, down to off.",
+      "description": "Step each display down one preset from its own level, down to off.",
       "mode": "no-view"
     },
     {

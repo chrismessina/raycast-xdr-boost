@@ -87,11 +87,6 @@ describe("computeNext: one complete snapshot per operation, from the SAVED inten
       computeNext({ kind: "displays", levels: { BI: 1 } }, { all: MEDIUM, levels: {} }, ["BI", "XDR"]).intent,
     ).toEqual({ all: MEDIUM, levels: { BI: 1 } });
   });
-
-  it("restore applies the saved intent unchanged", () => {
-    const saved = { all: HIGH, levels: { BI: 1 } };
-    expect(computeNext({ kind: "restore" }, saved, ["BI", "XDR"]).intent).toEqual(saved);
-  });
 });
 
 describe("normalize: off everywhere is All Displays → Off", () => {
@@ -194,20 +189,6 @@ describe("G2: toggles decide from what the displays are doing now", () => {
       kind: "displays",
       levels: { BI: 1 },
     });
-  });
-});
-
-describe("G2 end to end: Toggle with the helper stopped and High saved", () => {
-  it("turns the boost on (it does not save Off while nothing is boosted)", () => {
-    const stopped = {
-      running: false,
-      displays: [
-        { uuid: "BI", level: 1 },
-        { uuid: "XDR", level: 1 },
-      ],
-    };
-    const op = resolveToggle({ kind: "toggle", level: 1.5625 }, stopped);
-    expect(computeNext(op, { all: 1.5625, levels: {} }, ["BI", "XDR"]).intent).toEqual({ all: 1.5625, levels: {} });
   });
 });
 

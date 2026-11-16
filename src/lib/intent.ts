@@ -1,8 +1,5 @@
-// The extension is the ONLY writer of intent (Codex DESIGN round 9, option A). An operation is turned into one
-// complete snapshot {all, levels} here; that exact snapshot is saved, sent to the helper (which replaces its
-// state with it and never derives intent itself), and verified on read-back. Pure: no Raycast or helper imports.
 import type { HelperStatus } from "./helper";
-import { EPSILON, MAX, OFF, stepLevel } from "./levels";
+import { clampLevel, MAX, OFF, sameLevel, stepLevel } from "./levels";
 
 /** The All Displays level, plus each display's own level by hardware UUID (kept while it is unplugged). */
 export interface Intent {
@@ -13,17 +10,11 @@ export interface Intent {
 export const NO_INTENT: Intent = { all: OFF, levels: {} };
 
 export type Operation =
-  /** All Displays → level: resets every per-display level. */
   | { kind: "all"; level: number }
-  /** These displays → their levels; every other display, connected or unplugged, keeps its own. */
   | { kind: "displays"; levels: Record<string, number> }
-  /** Increase / Decrease: each CONNECTED display steps from its own level. Unplugged displays are untouched. */
   | { kind: "step"; direction: 1 | -1 }
-  /** Toggle: any connected display boosted → everything off; otherwise All Displays → `level`. */
   | { kind: "toggle"; level: number }
-  /** One display: boosted → off; off → `level`. */
   | { kind: "toggleDisplay"; uuid: string; level: number }
-  /** Apply the saved intent unchanged (restore after restart, replacing an outdated helper). */
   | { kind: "restore" };
 
 export function resolve(intent: Intent, uuid: string): number {
@@ -37,14 +28,13 @@ export function boostsAnything(intent: Intent): boolean {
 export function sameIntent(a: Intent, b: Intent): boolean {
   const keys = new Set([...Object.keys(a.levels), ...Object.keys(b.levels)]);
   return (
-    Math.abs(a.all - b.all) < EPSILON &&
+    sameLevel(a.all, b.all) &&
     [...keys].every(
-      (k) => a.levels[k] !== undefined && b.levels[k] !== undefined && Math.abs(a.levels[k] - b.levels[k]) < EPSILON,
+      (k) => a.levels[k] !== undefined && b.levels[k] !== undefined && sameLevel(a.levels[k], b.levels[k]),
     )
   );
 }
 
-/** Saved intent from storage, validated: anything that isn't finite numbers within range is dropped. */
 export function parseIntent(raw: unknown): Intent | undefined {
   if (!raw || typeof raw !== "object") return undefined;
   const { all, levels } = raw as { all?: unknown; levels?: unknown };
@@ -52,14 +42,10 @@ export function parseIntent(raw: unknown): Intent | undefined {
   const clean: Record<string, number> = {};
   if (levels && typeof levels === "object") {
     for (const [uuid, level] of Object.entries(levels as Record<string, unknown>)) {
-      if (typeof level === "number" && Number.isFinite(level)) clean[uuid] = clamp(level);
+      if (typeof level === "number" && Number.isFinite(level)) clean[uuid] = clampLevel(level);
     }
   }
-  return { all: clamp(all), levels: clean };
-}
-
-function clamp(level: number): number {
-  return Math.min(Math.max(level, OFF), MAX);
+  return { all: clampLevel(all), levels: clean };
 }
 
 export interface Next {
@@ -68,21 +54,17 @@ export interface Next {
   saturated: boolean;
 }
 
-/**
- * The complete next intent for `op`, from the SAVED intent (never from what a stopped or outdated helper
- * reports) and the UUIDs of the XDR displays connected right now. Then the one "off everywhere" rule:
- * when every connected display resolves to off and no unplugged display keeps a boost, it is All Displays → Off.
- */
+/** The next intent for `op`, from the SAVED intent and the UUIDs of the XDR displays connected now. */
 export function computeNext(op: Operation, saved: Intent, connected: string[]): Next {
   let intent: Intent;
   let saturated = false;
   switch (op.kind) {
     case "all":
-      intent = { all: clamp(op.level), levels: {} };
+      intent = { all: clampLevel(op.level), levels: {} };
       break;
     case "displays": {
       const levels = { ...saved.levels };
-      for (const [uuid, level] of Object.entries(op.levels)) levels[uuid] = clamp(level);
+      for (const [uuid, level] of Object.entries(op.levels)) levels[uuid] = clampLevel(level);
       intent = { all: saved.all, levels };
       break;
     }
@@ -93,7 +75,7 @@ export function computeNext(op: Operation, saved: Intent, connected: string[]): 
       for (const uuid of connected) {
         const from = resolve(saved, uuid);
         const to = stepLevel(from, op.direction).value;
-        if (Math.abs(to - from) >= EPSILON) saturated = false;
+        if (!sameLevel(to, from)) saturated = false;
         levels[uuid] = to;
       }
       intent = { all: saved.all, levels };
@@ -102,16 +84,15 @@ export function computeNext(op: Operation, saved: Intent, connected: string[]): 
     case "toggle":
       intent = connected.some((uuid) => resolve(saved, uuid) > OFF)
         ? { all: OFF, levels: {} }
-        : { all: clamp(op.level), levels: {} };
+        : { all: clampLevel(op.level), levels: {} };
       break;
     case "toggleDisplay": {
       const on = resolve(saved, op.uuid) > OFF;
-      intent = { all: saved.all, levels: { ...saved.levels, [op.uuid]: on ? OFF : clamp(op.level) } };
+      intent = { all: saved.all, levels: { ...saved.levels, [op.uuid]: on ? OFF : clampLevel(op.level) } };
       break;
     }
     case "restore":
-      // Applied exactly as saved (G1): normalizing here would turn "built-in off, XDR covered by All
-      // Displays but unplugged" into Off everywhere and lose the XDR's High.
+      // Not normalized: "built-in off, an unplugged XDR covered by All Displays" would become Off everywhere.
       return { intent: { all: saved.all, levels: { ...saved.levels } }, saturated: false };
   }
   return { intent: normalize(intent, connected), saturated };
@@ -128,10 +109,6 @@ export function normalize(intent: Intent, connected: string[]): Intent {
   return everyConnectedOff && !unpluggedBoosted ? { all: OFF, levels: {} } : intent;
 }
 
-/**
- * The helper has applied `intent`: a running helper reports exactly this snapshot (including unplugged
- * displays), and a snapshot that boosts nothing is acknowledged by the helper having quit.
- */
 /** How the helper turns levels into light: the "Boost Strategy" and "External XDR Maximum" preferences. */
 export interface Tuning {
   strategy: "adaptive" | "fixed";
@@ -141,48 +118,50 @@ export interface Tuning {
   lowBattery: number;
 }
 
+/** The running helper reports exactly this tuning. */
+export function matchesTuning(status: HelperStatus, tuning: Tuning): boolean {
+  return (
+    status.strategy === tuning.strategy &&
+    typeof status.externalMax === "number" &&
+    sameLevel(status.externalMax, tuning.externalMax) &&
+    typeof status.lowBattery === "number" &&
+    sameLevel(status.lowBattery, tuning.lowBattery)
+  );
+}
+
 export function acknowledged(after: HelperStatus, intent: Intent, tuning: Tuning): boolean {
   if (!boostsAnything(intent)) return !after.running;
   return (
     after.running &&
     sameIntent({ all: after.allLevel, levels: after.levels ?? {} }, intent) &&
-    typeof after.externalMax === "number" &&
-    Math.abs(after.externalMax - tuning.externalMax) < EPSILON &&
-    after.strategy === tuning.strategy &&
-    typeof after.lowBattery === "number" &&
-    Math.abs(after.lowBattery - tuning.lowBattery) < EPSILON
+    matchesTuning(after, tuning)
   );
 }
 
-/** Max light gain on a built-in display, and the ceiling for the external preference (1.75^2.2). */
-export const BUILT_IN_MAX_GAIN = Math.pow(1.75, 2.2);
+/** Must equal `Curve.builtInMaxGain` in the Swift helper (src/lib/__tests__/protocol.test.ts checks). */
+export const BUILT_IN_MAX_GAIN = Math.pow(MAX, 2.2);
 
-/** The "External XDR Maximum" preference as a light gain, defaulting conservatively to 2×. */
 export function parseExternalMax(raw: string | undefined): number {
   const value = Number(raw);
   return Number.isFinite(value) && value > OFF ? Math.min(value, BUILT_IN_MAX_GAIN) : 2;
 }
 
-/** The "Pause When Battery Below" preference as a percent; anything unexpected is the 20% default. */
 export function parseLowBattery(raw: string | undefined): number {
   const value = Number(raw);
   return Number.isFinite(value) && value >= 0 && value <= 100 ? value : 20;
 }
 
-/** The "Boost Strategy" preference; anything unexpected is the adaptive default. */
 export function parseStrategy(raw: string | undefined): Tuning["strategy"] {
   return raw === "fixed" ? "fixed" : "adaptive";
 }
 
+type Live = { running: boolean; displays: { uuid: string; level: number }[] };
+
 /**
- * Toggles decide from what the displays are doing NOW (G2), not from saved intent: with the helper stopped
- * and High saved, the displays show no boost, so Toggle turns it on, as its label says. Called inside the
- * transaction's lock with the live read-back, it becomes an explicit operation.
+ * Toggles decide from what the displays are doing NOW, not from saved intent: with the helper stopped and
+ * High saved, the displays show no boost, so Toggle turns it on, as its label says.
  */
-export function resolveToggle(
-  op: Operation,
-  live: { running: boolean; displays: { uuid: string; level: number }[] },
-): Operation {
+export function resolveToggle(op: Operation, live: Live): Operation {
   const on = (uuid?: string) =>
     live.running && live.displays.some((d) => (uuid === undefined || d.uuid === uuid) && d.level > OFF);
   if (op.kind === "toggle") return { kind: "all", level: on() ? OFF : op.level };
@@ -191,18 +170,11 @@ export function resolveToggle(
 }
 
 /**
- * The operation to compute, given how the helper was found. A STALE helper (an older build, about to be
- * stopped) can't report levels, and its stopped read-back would wrongly say "off" (G4). So its toggles decide
- * from the saved intent when there is one (computeNext's toggle branches). With nothing saved the direction is
- * unknowable (an older build can idle with nothing boosted), so they fall back to "off", a safe choice that
- * `baselineLost` reports to the user (G5). Everything else toggles from the live read-back (G2).
+ * A STALE helper (an older build, about to be stopped) can't report levels, and its stopped read-back would
+ * wrongly say "off". Its toggles decide from the saved intent when there is one; with nothing saved the
+ * direction is unknowable, so they fall back to "off", which `baselineLost` discloses.
  */
-export function resolveOperation(
-  op: Operation,
-  live: { running: boolean; displays: { uuid: string; level: number }[] },
-  stale: boolean,
-  savedKnown: boolean,
-): Operation {
+export function resolveOperation(op: Operation, live: Live, stale: boolean, savedKnown: boolean): Operation {
   if (!stale) return resolveToggle(op, live);
   if (savedKnown) return op;
   if (op.kind === "toggle") return { kind: "all", level: OFF };
@@ -210,13 +182,10 @@ export function resolveOperation(
   return op;
 }
 
-/** How a replaced older helper with no saved levels affected the operation the user INVOKED (G3, G5). */
+/** How replacing an older helper with no saved levels affected the operation the user invoked. */
 export type BaselineLoss = "none" | "restore" | "toggle" | "change";
 
-/**
- * Judged on the operation as invoked, not as resolved: a stale toggle with nothing saved is resolved to
- * "All Off" as a safe fallback, and that fallback must be disclosed, not exempted like a deliberate All level.
- */
+/** Judged on the operation as INVOKED: a stale toggle's "All Off" fallback must be disclosed, not exempted. */
 export function baselineLost(invoked: Operation, stale: boolean, savedKnown: boolean): BaselineLoss {
   if (!stale || savedKnown || invoked.kind === "all") return "none";
   if (invoked.kind === "restore") return "restore";
