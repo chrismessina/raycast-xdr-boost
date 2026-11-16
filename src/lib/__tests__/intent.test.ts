@@ -7,6 +7,7 @@ import {
   normalize,
   parseExternalMax,
   parseIntent,
+  parseLowBattery,
   parseStrategy,
   resolveOperation,
   resolveToggle,
@@ -114,23 +115,40 @@ describe("acknowledged: the helper reports back the COMPLETE snapshot", () => {
     levels,
     externalMax: 2,
     strategy: "adaptive",
+    lowBattery: 20,
     displays: [],
   });
   it("matches all and every per-display level, unplugged ones included", () => {
     const intent = { all: 1, levels: { XDR: HIGH } };
-    expect(acknowledged(status(true, 1, { XDR: HIGH }), intent, { strategy: "adaptive", externalMax: 2 })).toBe(true);
-    expect(acknowledged(status(true, 1, {}), intent, { strategy: "adaptive", externalMax: 2 })).toBe(false);
     expect(
-      acknowledged(status(true, 1, { XDR: HIGH, BI: LOW }), intent, { strategy: "adaptive", externalMax: 2 }),
+      acknowledged(status(true, 1, { XDR: HIGH }), intent, { strategy: "adaptive", externalMax: 2, lowBattery: 20 }),
+    ).toBe(true);
+    expect(acknowledged(status(true, 1, {}), intent, { strategy: "adaptive", externalMax: 2, lowBattery: 20 })).toBe(
+      false,
+    );
+    expect(
+      acknowledged(status(true, 1, { XDR: HIGH, BI: LOW }), intent, {
+        strategy: "adaptive",
+        externalMax: 2,
+        lowBattery: 20,
+      }),
     ).toBe(false);
   });
   it("a snapshot that boosts nothing is acknowledged by the helper having quit", () => {
-    expect(acknowledged(status(false, 1, {}), { all: 1, levels: {} }, { strategy: "adaptive", externalMax: 2 })).toBe(
-      true,
-    );
-    expect(acknowledged(status(true, 1, {}), { all: 1, levels: {} }, { strategy: "adaptive", externalMax: 2 })).toBe(
-      false,
-    );
+    expect(
+      acknowledged(
+        status(false, 1, {}),
+        { all: 1, levels: {} },
+        { strategy: "adaptive", externalMax: 2, lowBattery: 20 },
+      ),
+    ).toBe(true);
+    expect(
+      acknowledged(
+        status(true, 1, {}),
+        { all: 1, levels: {} },
+        { strategy: "adaptive", externalMax: 2, lowBattery: 20 },
+      ),
+    ).toBe(false);
   });
 });
 
@@ -226,6 +244,12 @@ describe("Boost tuning (strategy + External XDR Maximum)", () => {
     expect(parseExternalMax("bogus")).toBe(2);
     expect(parseExternalMax("1")).toBe(2);
   });
+  it("parses the battery threshold, defaulting to 20%", () => {
+    expect(parseLowBattery("0")).toBe(0);
+    expect(parseLowBattery("50")).toBe(50);
+    expect(parseLowBattery(undefined)).toBe(20);
+    expect(parseLowBattery("bogus")).toBe(20);
+  });
   it("parses the strategy, defaulting to adaptive", () => {
     expect(parseStrategy("fixed")).toBe("fixed");
     expect(parseStrategy("adaptive")).toBe("adaptive");
@@ -238,12 +262,15 @@ describe("Boost tuning (strategy + External XDR Maximum)", () => {
       levels: {},
       externalMax,
       strategy,
+      lowBattery: 20,
       displays: [],
     });
     const intent = { all: 1.5625, levels: {} };
-    expect(acknowledged(s(2, "adaptive"), intent, { strategy: "adaptive", externalMax: 2 })).toBe(true);
-    expect(acknowledged(s(2, "fixed"), intent, { strategy: "adaptive", externalMax: 2 })).toBe(false);
-    expect(acknowledged(s(3, "adaptive"), intent, { strategy: "adaptive", externalMax: 2 })).toBe(false);
-    expect(acknowledged(s(null, null), intent, { strategy: "adaptive", externalMax: 2 })).toBe(false);
+    expect(acknowledged(s(2, "adaptive"), intent, { strategy: "adaptive", externalMax: 2, lowBattery: 20 })).toBe(true);
+    expect(acknowledged(s(2, "fixed"), intent, { strategy: "adaptive", externalMax: 2, lowBattery: 20 })).toBe(false);
+    expect(acknowledged(s(3, "adaptive"), intent, { strategy: "adaptive", externalMax: 2, lowBattery: 20 })).toBe(
+      false,
+    );
+    expect(acknowledged(s(null, null), intent, { strategy: "adaptive", externalMax: 2, lowBattery: 20 })).toBe(false);
   });
 });

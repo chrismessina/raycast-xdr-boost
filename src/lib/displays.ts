@@ -70,12 +70,14 @@ const PAUSE_LABELS: Record<string, string> = {
   "system-sleep": "Sleeping",
   "displays-asleep": "Displays Asleep",
   "low-power-mode": "Low Power Mode",
+  "low-battery": "Battery Low",
 };
 
 /** "Paused: Low Power Mode", or undefined when the boost isn't paused. One reason shown, in a stable order. */
 export function pauseLabel(status: HelperStatus): string | undefined {
   const reasons = status.running ? (status.pauseReasons ?? []) : [];
   const first = Object.keys(PAUSE_LABELS).find((reason) => reasons.includes(reason)) ?? reasons[0];
+  if (first === "low-battery" && status.lowBattery) return `Paused: Battery Below ${status.lowBattery}%`;
   return first ? `Paused: ${PAUSE_LABELS[first] ?? first}` : undefined;
 }
 

@@ -85,6 +85,7 @@ describe("pause label", () => {
     expect(pauseLabel(paused(["low-power-mode"]))).toBe("Paused: Low Power Mode");
     expect(pauseLabel(paused([]))).toBeUndefined();
     expect(pauseLabel(paused(["low-power-mode"], false))).toBeUndefined();
+    expect(pauseLabel({ ...paused(["low-battery"]), lowBattery: 20 })).toBe("Paused: Battery Below 20%");
   });
 });
 

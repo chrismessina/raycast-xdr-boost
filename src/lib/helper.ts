@@ -38,6 +38,8 @@ export interface HelperStatus {
   externalMax?: number | null;
   /** The running helper's strategy; null when not running. */
   strategy?: "adaptive" | "fixed" | null;
+  /** The running helper's low-battery threshold in percent (0 = never); null when not running. */
+  lowBattery?: number | null;
   /** Why a running helper has paused the boost: screen-locked, screen-saver, system-sleep, … (empty when boosting). */
   pauseReasons?: string[];
   /** False on M5 Pro / M5 Max, where macOS ignores gamma tables. */
@@ -66,6 +68,7 @@ export async function status(): Promise<HelperStatus> {
 export interface HelperTuning {
   externalMax: number;
   strategy: string;
+  lowBattery: number;
 }
 
 export async function start(all: number, levels: Record<string, number>, tuning: HelperTuning): Promise<void> {
@@ -79,6 +82,7 @@ export async function start(all: number, levels: Record<string, number>, tuning:
     JSON.stringify(levels),
     JSON.stringify(tuning.externalMax),
     JSON.stringify(tuning.strategy),
+    JSON.stringify(tuning.lowBattery),
   ];
   const child = spawn(bin, args, {
     detached: true,
@@ -96,7 +100,7 @@ export async function setLevels(
   intent: { all: number; levels: Record<string, number> },
   tuning: HelperTuning,
 ): Promise<void> {
-  await swift.setLevels(intent.all, intent.levels, tuning.externalMax, tuning.strategy);
+  await swift.setLevels(intent.all, intent.levels, tuning.externalMax, tuning.strategy, tuning.lowBattery);
 }
 
 export async function stop(): Promise<void> {

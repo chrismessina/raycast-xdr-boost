@@ -20,8 +20,10 @@ enum Notifications {
     static let quit = Notification.Name("com.chrismessina.xdr-boost.quit")
 
     /// The complete intent snapshot: the helper replaces its state with it.
-    static func postSet(all: Double, levels: [String: Double], externalMax: Double, strategy: String) {
-        let info: [String: Any] = ["all": all, "levels": levels, "externalMax": externalMax, "strategy": strategy]
+    static func postSet(all: Double, levels: [String: Double], externalMax: Double, strategy: String, lowBattery: Double) {
+        let info: [String: Any] = [
+            "all": all, "levels": levels, "externalMax": externalMax, "strategy": strategy, "lowBattery": lowBattery,
+        ]
         DistributedNotificationCenter.default().postNotificationName(set, object: nil, userInfo: info, deliverImmediately: true)
     }
 
@@ -34,7 +36,7 @@ enum Notifications {
 /// state file reports a different version (or none): after an extension update the old binary can keep running,
 /// and it may not understand the new messages or apply the current build's limits (the headroom cap, the
 /// external ceiling). A matching version proves which contract is running, not that its limits are sufficient.
-let helperProtocol = 6
+let helperProtocol = 7
 
 enum Levels {
     static let range: ClosedRange<Double> = 1.0...1.75
@@ -44,6 +46,8 @@ enum Levels {
     static func clampGain(_ value: Double) -> Double { min(max(value, 1.0), Curve.builtInMaxGain) }
     /// Anything but "fixed" is the adaptive default.
     static func strategy(_ value: String) -> String { value == "fixed" ? "fixed" : "adaptive" }
+    /// A battery threshold in percent: 0 (never) … 100.
+    static func batteryPercent(_ value: Double) -> Double { value.isFinite ? min(max(value, 0), 100) : 0 }
 }
 
 struct StateFile: Codable {
@@ -53,6 +57,7 @@ struct StateFile: Codable {
     let levels: [String: Double]
     let externalMax: Double
     let strategy: String
+    let lowBattery: Double
     let pauseReasons: [String]
     let updatedAt: String
     let displays: [DisplaySnapshot]
@@ -69,6 +74,7 @@ struct HelperState: Encodable {
     let levels: [String: Double]
     let externalMax: Double?
     let strategy: String?
+    let lowBattery: Double?
     /// Why a running helper has paused the boost (empty when boosting or not running).
     let pauseReasons: [String]
     /// False on M5 Pro / M5 Max, where gamma tables have no visible effect (see `gammaSupported()`).
@@ -124,17 +130,20 @@ enum PidFile {
 
 /// Starts the long-running boost. Never returns while any display is boosted.
 /// Argument order matters: `PidFile.isHelper` reads the state path from argv[3].
-@raycast func run(level: Double, state: String, levels: [String: Double], externalMax: Double, strategy: String) throws {
+@raycast func run(
+    level: Double, state: String, levels: [String: Double], externalMax: Double, strategy: String, lowBattery: Double
+) throws {
     let all = Levels.clamp(level)
     let perDisplay = Levels.clamp(levels)
     let ceiling = Levels.clampGain(externalMax)
     let mode = Levels.strategy(strategy)
+    let batteryFloor = Levels.batteryPercent(lowBattery)
     let pidURL = PidFile.url(forState: state)
 
     // Single instance: hand the levels to the running helper instead.
     if let pid = PidFile.read(pidURL), PidFile.isHelper(pid, state: state) {
         helperLog.notice("run: helper \(pid, privacy: .public) already running; handing it all \(all, privacy: .public), levels \(perDisplay, privacy: .public)")
-        Notifications.postSet(all: all, levels: perDisplay, externalMax: ceiling, strategy: mode)
+        Notifications.postSet(all: all, levels: perDisplay, externalMax: ceiling, strategy: mode, lowBattery: batteryFloor)
         return
     }
     guard all > 1.0 || perDisplay.values.contains(where: { $0 > 1.0 }) else { return } // everything off
@@ -145,7 +154,9 @@ enum PidFile {
 
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
-    Session.current = Session(all: all, levels: perDisplay, externalMax: ceiling, strategy: mode, statePath: state, pidURL: pidURL)
+    Session.current = Session(
+        all: all, levels: perDisplay, externalMax: ceiling, strategy: mode, lowBattery: batteryFloor,
+        statePath: state, pidURL: pidURL)
     Session.current?.begin()
     app.run()
 }
@@ -159,8 +170,11 @@ final class Session {
     private let pidURL: URL
     private var signalSources: [DispatchSourceSignal] = []
 
-    init(all: Double, levels: [String: Double], externalMax: Double, strategy: String, statePath: String, pidURL: URL) {
-        booster = Booster(allLevel: all, levels: levels, externalMax: externalMax, strategy: strategy)
+    init(
+        all: Double, levels: [String: Double], externalMax: Double, strategy: String, lowBattery: Double,
+        statePath: String, pidURL: URL
+    ) {
+        booster = Booster(allLevel: all, levels: levels, externalMax: externalMax, strategy: strategy, lowBattery: lowBattery)
         self.statePath = statePath
         self.pidURL = pidURL
     }
@@ -176,7 +190,8 @@ final class Session {
             // A snapshot needs both fields; anything else is not from this build of the extension: ignore it.
             guard let all = (info["all"] as? NSNumber)?.doubleValue, let raw = info["levels"] as? [String: Any],
                   let ceiling = (info["externalMax"] as? NSNumber)?.doubleValue,
-                  let mode = info["strategy"] as? String else {
+                  let mode = info["strategy"] as? String,
+                  let batteryFloor = (info["lowBattery"] as? NSNumber)?.doubleValue else {
                 helperLog.error("set notification without a complete snapshot; ignored")
                 return
             }
@@ -184,7 +199,8 @@ final class Session {
                 all: Levels.clamp(all),
                 levels: Levels.clamp(raw.compactMapValues { ($0 as? NSNumber)?.doubleValue }),
                 externalMax: Levels.clampGain(ceiling),
-                strategy: Levels.strategy(mode)
+                strategy: Levels.strategy(mode),
+                lowBattery: Levels.batteryPercent(batteryFloor)
             )
             // Everything off (connected and remembered): exit, which also restores every table.
             if !self.booster.wantsBoost { self.quit() }
@@ -250,6 +266,7 @@ final class Session {
             levels: booster.levels,
             externalMax: booster.externalMax,
             strategy: booster.strategy,
+            lowBattery: booster.lowBattery,
             pauseReasons: booster.pauseReasons.sorted(),
             updatedAt: ISO8601DateFormatter().string(from: Date()),
             displays: booster.snapshots
@@ -309,6 +326,7 @@ final class Session {
         levels: running ? (file?.levels ?? [:]) : [:],
         externalMax: running ? file?.externalMax : nil,
         strategy: running ? file?.strategy : nil,
+        lowBattery: running ? file?.lowBattery : nil,
         pauseReasons: running ? (file?.pauseReasons ?? []) : [],
         gammaSupported: gammaSupported(),
         updatedAt: file?.updatedAt,
@@ -318,10 +336,10 @@ final class Session {
 
 /// Replaces the running helper's intent with this complete snapshot (the extension is the only writer).
 /// The helper quits by itself when the snapshot boosts nothing.
-@raycast func setLevels(all: Double, levels: [String: Double], externalMax: Double, strategy: String) {
+@raycast func setLevels(all: Double, levels: [String: Double], externalMax: Double, strategy: String, lowBattery: Double) {
     Notifications.postSet(
         all: Levels.clamp(all), levels: Levels.clamp(levels), externalMax: Levels.clampGain(externalMax),
-        strategy: Levels.strategy(strategy))
+        strategy: Levels.strategy(strategy), lowBattery: Levels.batteryPercent(lowBattery))
 }
 
 /// Stops the running helper, which restores every display.

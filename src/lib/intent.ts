@@ -137,6 +137,8 @@ export interface Tuning {
   strategy: "adaptive" | "fixed";
   /** Max LIGHT gain on external XDR displays under "fixed". */
   externalMax: number;
+  /** Pause on battery power below this charge percentage; 0 = never. */
+  lowBattery: number;
 }
 
 export function acknowledged(after: HelperStatus, intent: Intent, tuning: Tuning): boolean {
@@ -146,7 +148,9 @@ export function acknowledged(after: HelperStatus, intent: Intent, tuning: Tuning
     sameIntent({ all: after.allLevel, levels: after.levels ?? {} }, intent) &&
     typeof after.externalMax === "number" &&
     Math.abs(after.externalMax - tuning.externalMax) < EPSILON &&
-    after.strategy === tuning.strategy
+    after.strategy === tuning.strategy &&
+    typeof after.lowBattery === "number" &&
+    Math.abs(after.lowBattery - tuning.lowBattery) < EPSILON
   );
 }
 
@@ -157,6 +161,12 @@ export const BUILT_IN_MAX_GAIN = Math.pow(1.75, 2.2);
 export function parseExternalMax(raw: string | undefined): number {
   const value = Number(raw);
   return Number.isFinite(value) && value > OFF ? Math.min(value, BUILT_IN_MAX_GAIN) : 2;
+}
+
+/** The "Pause When Battery Below" preference as a percent; anything unexpected is the 20% default. */
+export function parseLowBattery(raw: string | undefined): number {
+  const value = Number(raw);
+  return Number.isFinite(value) && value >= 0 && value <= 100 ? value : 20;
 }
 
 /** The "Boost Strategy" preference; anything unexpected is the adaptive default. */

@@ -1,4 +1,5 @@
 import Cocoa
+import IOKit.ps
 import os
 
 let boosterLog = Logger(subsystem: "com.chrismessina.xdr-boost", category: "booster")
@@ -89,6 +90,8 @@ final class Booster {
     private(set) var externalMax: Double
     /// "adaptive" (follow the brightness slider) or "fixed": see Curve.swift.
     private(set) var strategy: String
+    /// Pause while on battery power below this charge percentage; 0 = never (the "Pause When Battery Below" preference).
+    private(set) var lowBattery: Double
     /// Why the boost is paused, if it is. A SET, after Illuminate's SuspensionState (MIT): clearing one reason
     /// (the screen saver stopping) cannot resume the boost while another (the lock screen) still holds.
     private(set) var pauseReasons: Set<String> = []
@@ -99,14 +102,16 @@ final class Booster {
     private var targets: [Target] = []
     private var tickTimer: Timer?
     private var reassertTimer: Timer?
+    private var batteryTimer: Timer?
     private var builtSignature = ""
     private var pendingRebuild: DispatchWorkItem?
 
-    init(allLevel: Double, levels: [String: Double], externalMax: Double, strategy: String) {
+    init(allLevel: Double, levels: [String: Double], externalMax: Double, strategy: String, lowBattery: Double) {
         self.allLevel = allLevel
         self.levels = levels
         self.externalMax = externalMax
         self.strategy = strategy
+        self.lowBattery = lowBattery
         let ws = NSWorkspace.shared.notificationCenter
         ws.addObserver(self, selector: #selector(scheduleRebuild), name: NSWorkspace.screensDidWakeNotification, object: nil)
         ws.addObserver(self, selector: #selector(scheduleRebuild), name: NSWorkspace.didWakeNotification, object: nil)
@@ -149,6 +154,8 @@ final class Booster {
         reconcile()
         tickTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in self?.tick() }
         reassertTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in self?.reassert() }
+        batteryTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in self?.checkBattery() }
+        checkBattery()
         tick()
         onChange?()
     }
@@ -189,12 +196,14 @@ final class Booster {
     /// Replaces the whole intent with the extension's snapshot (the extension is the only writer of intent):
     /// `all` and every per-display level, unplugged displays included. An empty `levels` clears overrides.
     /// Displays whose own request (level, strategy, ceiling) did not change are left alone (`apply` checks `requestKey`).
-    func replaceIntent(all: Double, levels newLevels: [String: Double], externalMax newMax: Double, strategy newStrategy: String) {
+    func replaceIntent(all: Double, levels newLevels: [String: Double], externalMax newMax: Double, strategy newStrategy: String, lowBattery newLowBattery: Double) {
         boosterLog.notice("intent: all \(all, privacy: .public), levels \(newLevels, privacy: .public), externalMax \(newMax, privacy: .public), strategy \(newStrategy, privacy: .public)")
         allLevel = all
         levels = newLevels
         externalMax = newMax
         strategy = newStrategy
+        lowBattery = newLowBattery
+        checkBattery()
         reapply()
     }
 
@@ -249,6 +258,31 @@ final class Booster {
         } else {
             onChange?()
         }
+    }
+
+    /// Sets or clears the "low-battery" pause reason: on battery power and below `lowBattery` percent. Checked at
+    /// start, when the threshold changes, and every 60 s. A Mac without a battery never pauses for this.
+    func checkBattery() {
+        let low: Bool = {
+            guard lowBattery > 0, let charge = Self.batteryOnBatteryPower() else { return false }
+            return charge < lowBattery
+        }()
+        if low != pauseReasons.contains("low-battery") { setPaused("low-battery", low) }
+    }
+
+    /// The internal battery's charge percentage while running on it; nil on AC power or without a battery.
+    private static func batteryOnBatteryPower() -> Double? {
+        guard let info = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
+              let list = IOPSCopyPowerSourcesList(info)?.takeRetainedValue() as? [CFTypeRef] else { return nil }
+        for source in list {
+            guard let desc = IOPSGetPowerSourceDescription(info, source)?.takeUnretainedValue() as? [String: Any],
+                  desc[kIOPSTypeKey] as? String == kIOPSInternalBatteryType,
+                  desc[kIOPSPowerSourceStateKey] as? String == kIOPSBatteryPowerValue,
+                  let current = desc[kIOPSCurrentCapacityKey] as? Double,
+                  let max = desc[kIOPSMaxCapacityKey] as? Double, max > 0 else { continue }
+            return current / max * 100
+        }
+        return nil
     }
 
     // MARK: - Per-target state machine
@@ -507,6 +541,7 @@ final class Booster {
     private func tearDown() {
         tickTimer?.invalidate(); tickTimer = nil
         reassertTimer?.invalidate(); reassertTimer = nil
+        batteryTimer?.invalidate(); batteryTimer = nil
         let hadTable = targets.contains { $0.writtenLast != nil }
         targets.forEach { $0.trigger?.orderOut(nil) }
         targets.removeAll()

@@ -15,6 +15,7 @@ import {
   Operation,
   parseExternalMax,
   parseIntent,
+  parseLowBattery,
   parseStrategy,
   resolveOperation,
   Tuning,
@@ -43,7 +44,11 @@ export async function getWanted(): Promise<Intent | undefined> {
 /** How the helper turns levels into light (Boost Strategy + External XDR Maximum), sent with every snapshot. */
 export function tuning(): Tuning {
   const prefs = getPreferenceValues<Preferences>();
-  return { strategy: parseStrategy(prefs.boostStrategy), externalMax: parseExternalMax(prefs.externalMax) };
+  return {
+    strategy: parseStrategy(prefs.boostStrategy),
+    externalMax: parseExternalMax(prefs.externalMax),
+    lowBattery: parseLowBattery(prefs.pauseBelowBattery),
+  };
 }
 
 export function defaultLevel(): number {

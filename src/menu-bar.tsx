@@ -45,7 +45,9 @@ export default function Command() {
       const ceilingChanged =
         current.running &&
         !isStale(current) &&
-        (current.externalMax !== wanted.externalMax || current.strategy !== wanted.strategy);
+        (current.externalMax !== wanted.externalMax ||
+          current.strategy !== wanted.strategy ||
+          current.lowBattery !== wanted.lowBattery);
       if (isStale(current) || decision.action === "start" || ceilingChanged) {
         const applied = await applyOperation({ kind: "restore" });
         current = applied.after;
