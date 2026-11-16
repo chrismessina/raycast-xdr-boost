@@ -24,14 +24,14 @@ tags:
 # An XDR Boost helper from an older build kept running after a rebuild
 
 The general pattern is in the plugin learning
-`/Users/messina/Developer/GitHub/chrismessina/raycast-extensions-skills/plugins/raycast-extensions/learnings/architecture-patterns/long-running-helper-outlives-extension-updates.md`.
+`~/Developer/GitHub/chrismessina/raycast-extensions-skills/plugins/raycast-extensions/learnings/architecture-patterns/long-running-helper-outlives-extension-updates.md`.
 This doc holds XDR Boost's own incident, review history and code.
 
 ## Why the helper outlives the build
 
 `helper.start` spawns the compiled `run` function with `detached: true` and `stdio: "ignore"`, then
 calls `child.unref()`:
-`/Users/messina/Developer/GitHub/chrismessina/raycast-xdr-boost/src/lib/helper.ts:71-92` (`start`; spawn at
+`src/lib/helper.ts:71-92` (`start`; spawn at
 83-86, unref at 91). Nothing couples the helper to the command's process. Replacing the binary in
 `assets/` does not stop a running helper.
 
@@ -56,20 +56,20 @@ As recorded: after a rebuild, a helper from the previous build was still running
 - Its state file no longer decoded into the new `StateFile` shape, so `status` reported every display
   Off while it was still boosting.
 - Every change then waited out `SETTLE_TIMEOUT_MS` (3000,
-  `/Users/messina/Developer/GitHub/chrismessina/raycast-xdr-boost/src/lib/control.ts:28`) and failed.
+  `src/lib/control.ts:28`) and failed.
   The current text of that error is `"The helper did not confirm the new levels within 3 seconds."`
   (`control.ts:120`).
 - It lacked the headroom cap the new build added. The cap is not a hardware safety limit:
-  `/Users/messina/Developer/GitHub/chrismessina/raycast-xdr-boost/docs/solutions/pro-display-xdr-blanks-on-gamma-table-edr-boost.md`
+  `docs/solutions/pro-display-xdr-blanks-on-gamma-table-edr-boost.md`
   shows the panel blanked with the cap in place. Protocol freshness proves which contract is running,
   not that the panel is safe.
 
 ## What the code does now
 
 **Protocol on both sides.** `helperProtocol = 6` at
-`/Users/messina/Developer/GitHub/chrismessina/raycast-xdr-boost/swift/Sources/XDRBoostHelper/Exports.swift:37`
+`swift/Sources/XDRBoostHelper/Exports.swift:37`
 and `HELPER_PROTOCOL = 6` at
-`/Users/messina/Developer/GitHub/chrismessina/raycast-xdr-boost/src/lib/protocol.ts:2`. Every state
+`src/lib/protocol.ts:2`. Every state
 write carries it (`writeState`, `Exports.swift:245-261`). `isStale` is `s.running && s.protocol !== HELPER_PROTOCOL`
 (`helper.ts:106-109`).
 
@@ -81,7 +81,7 @@ differs is also stale; the code treats every stale helper's levels as unusable a
 instead.
 
 **Replacement inside the single-writer transaction.** `applyOperation`
-(`/Users/messina/Developer/GitHub/chrismessina/raycast-xdr-boost/src/lib/control.ts:90-127`) holds the
+(`src/lib/control.ts:90-127`) holds the
 cross-process lock (`src/lib/lock.ts`) for the whole sequence:
 
 1. Read live status and the saved intent, and decide the operation and any baseline loss before
@@ -100,7 +100,7 @@ cross-process lock (`src/lib/lock.ts`) for the whole sequence:
    (`control.ts:117-121`). `acknowledged` treats a snapshot that boosts nothing as acknowledged by
    the helper having quit, compares levels and the ceiling within `EPSILON` = `1e-9`, and requires
    the same strategy
-   (`/Users/messina/Developer/GitHub/chrismessina/raycast-xdr-boost/src/lib/intent.ts:142-151`;
+   (`src/lib/intent.ts:142-151`;
    `src/lib/levels.ts:22`).
 
 **Toggles and lost baselines.** `resolveOperation` decides a stale helper's toggles from the saved
@@ -125,7 +125,7 @@ so it says nothing about which helper is running on a machine.
 
 The stale-replacement design and its regressions went through Codex rounds 9 to 13 on 2026-11-15/16.
 Reports are in
-`/Users/messina/.claude/plugins/data/codex-openai-codex/state/raycast-xdr-boost-398b30ff1e50d06e/jobs/`:
+`~/.claude/plugins/data/codex-openai-codex/state/raycast-xdr-boost-398b30ff1e50d06e/jobs/`:
 
 | Round | Job | Outcome |
 |---|---|---|

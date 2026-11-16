@@ -79,7 +79,7 @@ System Settings screenshot).
 - **Stopping the boost to recover.** After the process was killed, the table endpoint read back
   plain and the panel stayed black. On an orderly quit the helper also calls
   `CGDisplayRestoreColorSyncSettings()` (`tearDown`, `Booster.swift:506-513`; `Session.quit` in
-  `/Users/messina/Developer/GitHub/chrismessina/raycast-xdr-boost/swift/Sources/XDRBoostHelper/Exports.swift:237-243`),
+  `swift/Sources/XDRBoostHelper/Exports.swift:237-243`),
   but a process-driven restore after a blank was not separately tested. **Inference, not
   established:** because the table read back plain while the picture stayed black, and only a cable
   reconnect recovered it, the fault appears to persist downstream of the transfer table (the
@@ -141,15 +141,15 @@ helper writes a **light gain** to the table as `gain^(1/2.2)`. Everything below 
 therefore under the same two assumptions as the table above (light = f^2.2, SDR white = peak/H).
 
 - **Levels are positions.** Off 1, Low 1.1875, Medium 1.375, High 1.5625, Max 1.75
-  (`/Users/messina/Developer/GitHub/chrismessina/raycast-xdr-boost/src/lib/levels.ts:7-13`). A level's
+  (`src/lib/levels.ts:7-13`). A level's
   position is spaced evenly in light from 1 to the display's maximum gain, then gamma-encoded
   (`Curve.tableFactor(level:maxGain:maxLevel:)`,
-  `/Users/messina/Developer/GitHub/chrismessina/raycast-xdr-boost/swift/Sources/XDRBoostHelper/Curve.swift:60-65`). `factor(for:)` in
+  `swift/Sources/XDRBoostHelper/Curve.swift:60-65`). `factor(for:)` in
   `Booster.swift:118-129` puts these together per display.
 - **"Boost Strategy" preference** (`boostStrategy`, default `adaptive`, "Follow Brightness";
   alternative `fixed`, "Fixed Maximum"):
-  `/Users/messina/Developer/GitHub/chrismessina/raycast-xdr-boost/package.json`, parsed by
-  `parseStrategy` in `/Users/messina/Developer/GitHub/chrismessina/raycast-xdr-boost/src/lib/intent.ts:162-165`.
+  `package.json`, parsed by
+  `parseStrategy` in `src/lib/intent.ts:162-165`.
   - **adaptive:** max light gain = `min(0.6·H, 1.75^2.2, nitsCap·H/peak)` (`Curve.maxGain`,
     `Curve.swift:52-58`). The 0.6·H share and the per-model peaks are adapted from Illuminate's
     `BoostCurve.swift` and `DisplayProfile.swift` (https://github.com/fackelmeyer/illuminate), as
@@ -175,7 +175,7 @@ therefore under the same two assumptions as the table above (light = f^2.2, SDR 
   re-tested with the new code.
 - **Not about blanking, but in the same code:** a pause set (`pauseReasons`, `setPaused` at
   `Booster.swift:224-251`; observers in `Session.observePauseReasons`,
-  `/Users/messina/Developer/GitHub/chrismessina/raycast-xdr-boost/swift/Sources/XDRBoostHelper/Exports.swift:210-235`) releases every display on screen saver, lock, inactive
+  `swift/Sources/XDRBoostHelper/Exports.swift:210-235`) releases every display on screen saver, lock, inactive
   session, sleep, displays asleep or Low Power Mode, with status `.paused`. `gammaSupported()`
   (`Exports.swift:332-343`, after Illuminate's GammaCompatibility) reports M5 Pro / M5 Max, where
   the table has no visible effect. EDR counts as engaged above headroom 1.05 (`engagedHeadroom`,
@@ -211,7 +211,7 @@ The technique, for recognition:
 - Headroom (same technique, port source): https://github.com/fich-l/headroom
 - xdr-lift (gamma-encoding note, `0.95·H` cap, as attributed above): https://github.com/Justaboringname/xdr-lift
 - Illuminate (`BoostCurve`, `DisplayProfile`, `GammaCompatibility`, as attributed above): https://github.com/fackelmeyer/illuminate
-- The curve: `/Users/messina/Developer/GitHub/chrismessina/raycast-xdr-boost/swift/Sources/XDRBoostHelper/Curve.swift`
+- The curve: `swift/Sources/XDRBoostHelper/Curve.swift`
 - The only boosted-table writer:
-  `/Users/messina/Developer/GitHub/chrismessina/raycast-xdr-boost/swift/Sources/XDRBoostHelper/Booster.swift:405-418` (`write`)
-- `/Users/messina/Developer/GitHub/chrismessina/raycast-xdr-boost/docs/solutions/helper-outlives-extension-updates.md`
+  `swift/Sources/XDRBoostHelper/Booster.swift:405-418` (`write`)
+- `docs/solutions/helper-outlives-extension-updates.md`
