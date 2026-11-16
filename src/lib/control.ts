@@ -132,6 +132,10 @@ export async function applyOperation(op: Operation, options: { refreshMenuBar?: 
     const after = await poll((s) => !isStale(s) && acknowledged(s, intent, ceiling));
     if (isStale(after) || !acknowledged(after, intent, ceiling)) {
       log("not acknowledged", { intent, after: { running: after.running, all: after.allLevel, levels: after.levels } });
+      // Keep the saved intent equal to what a current helper reports, so the next change starts from what is
+      // actually applied. Never sooner: a change that did not take must not be saved.
+      if (after.running && !isStale(after))
+        await LocalStorage.setItem(WANTED_KEY, JSON.stringify({ all: after.allLevel, levels: after.levels ?? {} }));
       throw new Error("The helper did not confirm the new levels within 3 seconds.");
     }
     // Saved only once the helper confirmed it. After a failure the old intent stays, and the next change
