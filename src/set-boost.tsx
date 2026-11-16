@@ -19,13 +19,16 @@ export default function Command() {
   const [state, setState] = useState<HelperStatus>();
   const [busy, setBusy] = useState(true);
   const [hasSaved, setHasSaved] = useState(false);
+  const [loadError, setLoadError] = useState<string>();
 
   async function load() {
     try {
       const [now, saved] = await Promise.all([status(), getWanted()]);
       setState(now);
       setHasSaved(saved !== undefined);
+      setLoadError(undefined);
     } catch (error) {
+      setLoadError(error instanceof Error ? error.message : String(error));
       await showError(error, { title: "Couldn't Read XDR Boost" });
     } finally {
       setBusy(false);
@@ -71,7 +74,7 @@ export default function Command() {
     return (
       <ActionPanel title={name}>
         <Action
-          title={isOn ? "Turn off" : `Turn On at ${shortLabel(toggleTo)}`}
+          title={isOn ? "Turn Off" : `Turn On at ${shortLabel(toggleTo)}`}
           icon={dialIcon(indexOfLevel(toggleTo))}
           onAction={() => change(toggle, isOn ? `Turning Off ${name}` : `Boosting ${name}`)}
         />
@@ -94,7 +97,18 @@ export default function Command() {
 
   return (
     <List isLoading={busy} searchBarPlaceholder="Search displays…">
-      {state && isStale(state) ? (
+      {!state && loadError ? (
+        <List.EmptyView
+          icon={Icon.Warning}
+          title="Couldn't Read XDR Boost"
+          description={loadError}
+          actions={
+            <ActionPanel>
+              <Action title="Try Again" icon={Icon.ArrowClockwise} onAction={load} />
+            </ActionPanel>
+          }
+        />
+      ) : state && isStale(state) ? (
         <List.Section title="Update">
           <List.Item
             title="An Older XDR Boost Helper Is Running"
