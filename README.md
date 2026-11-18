@@ -48,7 +48,7 @@ How much brighter a level gets depends on the display and on your brightness sli
 
 1. Open Raycast and search for **"Show XDR Boost in Menu Bar"**
 2. Pick a level for all displays or for one display; the helper starts the moment a boost is on
-3. Use **"Toggle XDR Boost"** to turn the boost on at your default level, or off
+3. Use **"Toggle XDR Boost"** to turn the boost on at your default level, or off. Its subtitle in root search shows the current state, such as "On · High"
 
 ---
 
